@@ -579,6 +579,19 @@ describe("upload_to_matter: the confirmed call", () => {
     expect(textOf(result)).toBe(DONE_TEXT);
   });
 
+  it("gives a failed file without a sentence its code as the reason", async () => {
+    const f = fakes();
+    f.upload.mockImplementation(async (entry) =>
+      entry.name === "claim.pdf" ? { name: "claim.pdf", status: "failed", documentId: 31, code: "processing_failed" } : OUTCOMES[entry.name],
+    );
+    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
+
+    expect(textOf(result).split("\n")[0]).toBe("claim.pdf: failed — processing_failed");
+    expect(result.structuredContent).toMatchObject({
+      results: [{ name: "claim.pdf", status: "failed", doc_id: 31, code: "processing_failed", message: "processing_failed" }, {}, {}],
+    });
+  });
+
   it("appends the keychain warning once, after the matter's URL", async () => {
     const warning =
       "The OS keychain is not available on this machine (Download failed for @napi-rs/keyring: fetch failed); " +
@@ -589,14 +602,34 @@ describe("upload_to_matter: the confirmed call", () => {
     expect(textOf(result)).toBe(`${DONE_TEXT}\n${warning}`);
   });
 
-  it("uploads nothing when the files would take the matter past the plan's document limit", async () => {
-    const f = fakes({ matter: matterHolding(48) });
+  it.each([
+    { held: 50, what: "full" },
+    { held: 52, what: "over its limit, the plan having changed" },
+  ])("uploads nothing into a matter that is $what", async ({ held }) => {
+    const f = fakes({ matter: matterHolding(held) });
     const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
 
     expect(result).toStrictEqual(
-      errorResult("Matter #7 holds 48 of 50 documents; 3 more would exceed the limit. Nothing was uploaded."),
+      errorResult(
+        `Matter #7 holds ${held} of 50 documents; nothing can be added until some are removed on the matter page.`,
+      ),
     );
     expect(f.calls).toEqual(["getAccessToken", "currentUser", "getMatter(7)", "resolvePlan"]);
+  });
+
+  it("uploads into a matter with room for some of the files, each refused file reported on its own", async () => {
+    const f = fakes({ matter: matterHolding(48) });
+    const full: DocumentOutcome = {
+      name: "σημείωμα.txt",
+      status: "failed",
+      code: "document_limit_reached",
+      message: "Document limit reached (50 per matter).",
+    };
+    f.upload.mockImplementation(async (entry) => (entry.name === full.name ? full : OUTCOMES[entry.name]));
+    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
+
+    expect(f.upload).toHaveBeenCalledTimes(3);
+    expect(textOf(result).split("\n")[2]).toBe("σημείωμα.txt: failed — Document limit reached (50 per matter).");
   });
 
   it.each([

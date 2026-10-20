@@ -157,11 +157,12 @@ export async function handleUploadToMatter(args: UploadToMatterArgs, deps: ToolD
     if (args.plan_digest !== plan.digest) return listing("plan_changed", plan, holding);
     const uploads = plan.entries.filter((entry) => entry.decision === "upload");
     if (uploads.length === 0) return answer("Nothing to upload.");
+    // A matter with room for some of the files takes them: the server refuses the others one by one.
     const { held, limit } = holding;
-    if (limit !== -1 && held + uploads.length > limit) {
+    if (limit !== -1 && held >= limit) {
       return failure(
         `Matter #${args.matter_id} holds ${held} of ${limit} documents; ` +
-          `${uploads.length} more would exceed the limit. Nothing was uploaded.`,
+          "nothing can be added until some are removed on the matter page.",
       );
     }
     return await uploadPlanned(args, uploads, me, deps);
@@ -238,8 +239,14 @@ async function uploadPlanned(
   return report(args.matter_id, outcomes, deps);
 }
 
-/** The outcomes, one line per file, then the matter's URL and the keychain warning when there is one. */
-async function report(matterId: number, outcomes: DocumentOutcome[], deps: ToolDeps): Promise<CallToolResult> {
+/**
+ * The outcomes, one line per file, then the matter's URL and the keychain warning when there is
+ * one. A failure always says why: its code, when it came without a sentence.
+ */
+async function report(matterId: number, reported: DocumentOutcome[], deps: ToolDeps): Promise<CallToolResult> {
+  const outcomes = reported.map((outcome) =>
+    outcome.status === "failed" && outcome.message === undefined ? { ...outcome, message: outcome.code } : outcome,
+  );
   const matterUrl = `${deps.config.baseUrl}/matters/${matterId}`;
   const lines = outcomes.map(({ name, status, message }) =>
     message === undefined ? `${name}: ${status}` : `${name}: ${status} — ${message}`,

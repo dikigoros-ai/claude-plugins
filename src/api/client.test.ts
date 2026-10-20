@@ -591,6 +591,20 @@ describe("the bearer and the 401 retry", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
+  it("throws a 401 connector_token_not_accepted at once: a fresh token would not pass a route outside the allowlist", async () => {
+    const { fetchImpl, requests } = recordingFetch(json(401, { error: "connector_token_not_accepted" }));
+    const { api, onUnauthorized } = apiWith(fetchImpl);
+    const err = await refused(api.createTextDocument(7, { filename: "notes.txt", text: "Σημειώσεις" }));
+    expect(shown(err)).toEqual({
+      status: 401,
+      code: "connector_token_not_accepted",
+      metadata: {},
+      message: "401 connector_token_not_accepted",
+    });
+    expect(requests).toHaveLength(1);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
   it("throws what the retry answers when it is another refusal", async () => {
     const { fetchImpl, requests } = recordingFetch(
       json(401, AUTHENTICATION_REQUIRED),

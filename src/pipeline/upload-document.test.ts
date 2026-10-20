@@ -512,7 +512,8 @@ describe("uploadDocument: the poll", () => {
     ["a request that got no answer", new TypeError("fetch failed")],
     ["a 500", new ApiError(500, "http_500")],
     ["a 503", new ApiError(503, "http_503")],
-    ["a 429", new ApiError(429, "Too many requests")],
+    ["a 429 of the rate limit", new ApiError(429, "Too many requests")],
+    ["a 429 too_many_requests", new ApiError(429, "too_many_requests", { retryAfter: 2 })],
   ])("polls on after %s, and follows the document to ready", async (_what, blip) => {
     const f = fakes({ process: [processing(1), blip, ready(2)] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
@@ -536,6 +537,22 @@ describe("uploadDocument: the poll", () => {
     expect(outcome).toStrictEqual({ name: "claim.pdf", status: "processing", documentId: 31, ocrRemaining: 2, message });
   });
 
+  it.each([
+    [
+      "the weekly usage limit",
+      new ApiError(429, "Weekly usage limit reached", { limit: 3_800_000, used: 3_800_412 }),
+      "The weekly usage allowance is used up; it resets on Sunday 00:00 UTC.",
+    ],
+    ["another quota, with a limit and a used count", new ApiError(429, "ocr_quota_exceeded", { limit: 500, used: 500 }), "429 ocr_quota_exceeded"],
+  ])("ends the document at once when the poll meets %s (a 429 that waiting does not lift)", async (_what, quota, message) => {
+    const f = fakes({ process: [processing(2), quota, ready(2)] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+
+    expect(f.api.process).toHaveBeenCalledTimes(2);
+    expect(f.sleep).toHaveBeenCalledTimes(1);
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", documentId: 31, code: quota.code, message });
+  });
+
   it("ends on any other 409 from the poll", async () => {
     const f = fakes({ process: [new ApiError(409, "Document is not processing")] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
@@ -554,7 +571,12 @@ describe("uploadDocument: the poll", () => {
       { status: "failed", ocrRemaining: 0, errorCode: "no_text_extracted" } satisfies ProcessResult,
       { code: "no_text_extracted", message: "No readable text found — the pages appear to be blank" },
     ],
-    [{ status: "failed", ocrRemaining: 3 } satisfies ProcessResult, { code: "processing_failed" }],
+    // No sentence for it: the code stands in for one.
+    [{ status: "failed", ocrRemaining: 3 } satisfies ProcessResult, { code: "processing_failed", message: "processing_failed" }],
+    [
+      { status: "failed", ocrRemaining: 0, errorCode: "ocr_timeout" } satisfies ProcessResult,
+      { code: "ocr_timeout", message: "ocr_timeout" },
+    ],
   ])("reports a failed processing with its code: %j", async (result, expected) => {
     const f = fakes({ process: [processing(3), result] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
@@ -857,6 +879,13 @@ describe("uploadDocument: failures", () => {
       "the text create",
       planned("notes.txt", "text"),
       { readFile: [utf8("Σημείωμα.")], createTextDocument: [refused()] },
+      "POST /api/matters/7/documents/text",
+      {},
+    ],
+    [
+      "the text create, as a route outside the connector-token allowlist",
+      planned("notes.txt", "text"),
+      { readFile: [utf8("Σημείωμα.")], createTextDocument: [new ApiError(401, "connector_token_not_accepted")] },
       "POST /api/matters/7/documents/text",
       {},
     ],

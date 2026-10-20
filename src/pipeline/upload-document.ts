@@ -322,13 +322,15 @@ class DocumentUpload {
 
   /**
    * The outcome: the document's id as far as known, whether a role or a side given was applied to a
-   * document this upload made or resumed (false unless the PATCH took it), then `fields`.
+   * document this upload made or resumed (false unless the PATCH took it), then `fields`. A failure
+   * always says why: its code, when there is no sentence for it.
    */
   #outcome(status: OutcomeStatus, fields: Omit<DocumentOutcome, "name" | "status"> = {}): DocumentOutcome {
     const { role, side } = this.#ctx;
     const owed = (role !== undefined || side !== undefined) && this.#documentId !== undefined && status !== "duplicate";
     const roleApplied = owed ? (this.#roleApplied ?? false) : undefined;
-    const known = { documentId: this.#documentId, roleApplied, ...fields };
+    const message = fields.message ?? (status === "failed" ? fields.code : undefined);
+    const known = { documentId: this.#documentId, roleApplied, ...fields, message };
     const defined = Object.fromEntries(Object.entries(known).filter(([, value]) => value !== undefined));
     return { name: this.#name, status, ...(defined as typeof fields) };
   }
@@ -352,13 +354,19 @@ async function locally<T>(code: LocalFailure["code"], step: () => Promise<T>): P
 
 /**
  * A rejected poll that is polled again: a lost concurrency claim (another poll runs the same
- * batch) leaves nothing behind, a transient failure (no answer, a 5xx, a 429) its first line. Any
- * other refusal ends the upload.
+ * batch) leaves nothing behind, a transient failure (no answer, a 5xx, a rate limit's 429) its
+ * first line. Any other refusal ends the upload, a quota's 429 among them.
  */
 function pollAgainAfter(err: unknown): string | undefined {
   if (err instanceof ApiError && err.status === 409 && err.code === "processing_in_progress") return undefined;
+  if (err instanceof ApiError && err.status === 429 && isQuota(err)) throw err;
   if (!(err instanceof ApiError) || err.status >= 500 || err.status === 429) return firstLine(err);
   throw err;
+}
+
+/** A 429 that waiting does not lift: the weekly usage allowance, or a quota whose body counts its limit and use. */
+function isQuota(err: ApiError): boolean {
+  return err.code === "Weekly usage limit reached" || ("limit" in err.metadata && "used" in err.metadata);
 }
 
 /** A twin the server will not show (401, 403, 404) is a duplicate all the same: no twin to follow. */

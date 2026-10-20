@@ -355,17 +355,18 @@ export class DikigorosApi {
 
   /**
    * Sends the request with the session's access token and returns the success answer. After a
-   * 401 it asks onUnauthorized() once for a fresh token and sends the request again with it. A
-   * refusal throws the ApiError of the last answer: a second 401, or a 401 for which there is no
-   * fresh token, included. Without a token nothing is sent: ApiError(401, "not_signed_in"). A
-   * failure of getToken() or onUnauthorized() (the sign-in service unreachable) and a request that
-   * got no answer reject with their own error, untouched.
+   * 401 it asks onUnauthorized() once for a fresh token and sends the request again with it, but
+   * for a 401 connector_token_not_accepted: the main app takes no connector token on that route,
+   * so a fresh one would be refused the same way. A refusal throws the ApiError of the last answer:
+   * a second 401, or a 401 for which there is no fresh token, included. Without a token nothing is
+   * sent: ApiError(401, "not_signed_in"). A failure of getToken() or onUnauthorized() (the sign-in
+   * service unreachable) and a request that got no answer reject with their own error, untouched.
    */
   async #request(method: Method, path: string, body?: unknown): Promise<Answer> {
     const token = await this.#deps.getToken();
     if (token === null) throw new ApiError(401, "not_signed_in");
     let answer = await this.#send(method, path, token, body);
-    if (answer.status === 401) {
+    if (answer.status === 401 && !refusesConnectorTokens(answer)) {
       const fresh = await this.#deps.onUnauthorized();
       if (fresh !== null) answer = await this.#send(method, path, fresh, body);
     }
@@ -394,6 +395,11 @@ export class DikigorosApi {
 
 function documentsPath(matterId: number): string {
   return `/api/matters/${matterId}/documents`;
+}
+
+/** The main app's refusal of a route outside its connector-token allowlist (PR 1, lib/mcp/auth.ts). */
+function refusesConnectorTokens({ body }: Answer): boolean {
+  return isRecord(body) && body.error === "connector_token_not_accepted";
 }
 
 /**

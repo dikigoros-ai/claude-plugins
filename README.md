@@ -109,7 +109,7 @@ Each file ends as one of:
 - `processing`: still being processed after 10 minutes; the matter page carries on with it, or call again later.
 - `skipped`: a `.txt` or `.md` file that is empty, longer than 200,000 characters, or neither UTF-8 nor Windows Greek
   text.
-- `failed`, with the reason.
+- `failed`, with the reason (its code, when there is no sentence for it).
 
 Each file goes the way the uploader on dikigoros.ai sends it. Its SHA-256 is computed on this computer. A PDF or a
 DOCX is put in the DIKIGOROS private blob store under the matter, with a client token dikigoros.ai issues for that
@@ -214,8 +214,9 @@ another project, they would send the files and their upload tokens somewhere oth
 - Dotfiles are skipped: a folder's are left out of the listing, and one named directly is listed as skipped.
 - A file whose real path, links followed, leads out of the folder that was named (for a file named directly, the
   folder it is in) is skipped.
-- The plan's limit of documents per matter is checked before anything is uploaded: a call that would pass it uploads
-  nothing.
+- The plan's limit of documents per matter: a matter that holds as many already takes nothing, and the call says so
+  before uploading anything. A matter with room for some of the files takes them; each file past the limit then fails
+  on its own (`document_limit_reached`).
 - A file whose bytes are already in the matter is reported as a duplicate: no second document is created. Its bytes
   still go to the blob store first, as with the uploader on dikigoros.ai. When an earlier call left that document
   unfinished, it is picked up where it stopped instead.

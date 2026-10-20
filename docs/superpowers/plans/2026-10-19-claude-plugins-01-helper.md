@@ -392,7 +392,8 @@ Request rules: headers `Authorization: Bearer ${token}` (throw `ApiError(401, "n
 
 ```ts
 export type BlobContentType = "application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "image/jpeg";
-export interface BlobUploadArgs { api: Pick<DikigorosApi, "requestUploadToken">; matterId: number; pathname: string; bytes: Uint8Array; contentType: BlobContentType }
+export const BLOB_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+export interface BlobUploadArgs { api: Pick<DikigorosApi, "requestUploadToken">; matterId: number; pathname: string; bytes: Uint8Array; contentType: BlobContentType; timeoutMs?: number }
 export async function uploadBlob(args: BlobUploadArgs): Promise<{ url: string }>;
 ```
 

@@ -36,6 +36,11 @@ export function pathPdf(): Uint8Array {
   return buildPdf([() => ({ size: LETTER, resources: "<< >>", content: "10 w 50 400 m 550 400 l S" })]);
 }
 
+/** One page 100 pt wide and 14,400 pt tall (the tallest a PDF page may be) that strokes a line down it. */
+export function tallPdf(): Uint8Array {
+  return buildPdf([() => ({ size: [100, 14400], resources: "<< >>", content: "10 w 50 100 m 50 14300 l S" })]);
+}
+
 /** A text page followed by an inked scan. */
 export function twoPagePdf(): Uint8Array {
   return buildPdf([

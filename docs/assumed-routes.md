@@ -144,8 +144,9 @@ type IngestManifest =
 
 - `pdf`: one entry per page, from 1. `text` is the page's text layer as pdf.js reads it, its pieces joined by their
   place on the page. `needsOcr` is true for a page with fewer than 40 characters of text, spaces aside, or fewer than
-  half of them letters (Latin or Greek). Such a page is rendered 1600 px wide and its JPEG (quality 80) put in the
-  store; `imageBlobKey` is that blob's URL, absent for a page that rendered blank. When every page needs OCR and none
+  half of them letters (Latin or Greek). Such a page is rendered 1600 px wide (smaller, the same shape, when that would
+  pass 25 million pixels: a very tall page) and its JPEG (quality 80) put in the store; `imageBlobKey` is that blob's
+  URL, absent for a page that rendered blank. When every page needs OCR and none
   rendered anything, no document is registered: the file fails with `no_text_extracted`, its bytes already in the
   store, as with the web uploader.
 - `docx`: `fullText` is mammoth's raw text of the document, each paragraph followed by a blank line.

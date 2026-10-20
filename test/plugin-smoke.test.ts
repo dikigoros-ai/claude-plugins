@@ -5,10 +5,11 @@
 // repository, where an installed plugin's bundle also sits with no node_modules above it: pdf.js
 // cannot load @napi-rs/canvas by itself there, and works with what the helper gives it alone. They
 // prove that the worker beside the bundle loads, that the canvas factory renders a scanned page,
-// and that the canvas module's Path2D, installed as a global, draws a stroked path. The canvas is
-// the dev dependency, named through DIKIGOROS_HELPER_NATIVE_DIR, so nothing is downloaded. Not
-// proven here: the standard fonts and the wasm decoders. The counts come out the same without
-// either, and no fixture holds a JBIG2- or CCITT-encoded image.
+// that the canvas module's Path2D, installed as a global, draws a stroked path, and that the wasm
+// decoders beside the bundle load: test/fixtures/ccitt-g4.pdf is a CCITT G4 scan, which pdf.js
+// decodes with jbig2.wasm, and without it the page renders blank and counts no image. The canvas
+// is the dev dependency, named through DIKIGOROS_HELPER_NATIVE_DIR, so nothing is downloaded. Not
+// proven here: the standard fonts, as the counts come out the same without them.
 
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -211,6 +212,13 @@ describe("--extract-check, run from a copy of the plugin outside the repository"
 
   it("renders a page that only strokes a path, drawn with the canvas module's Path2D", async () => {
     const run = await extractCheck("path.pdf", pathPdf());
+    expect(run.stdout, run.stderr).toBe('{"pages":1,"needsOcr":1,"images":1}\n');
+    expect(run.code, run.stderr).toBe(0);
+  });
+
+  it("decodes a CCITT G4 scan with the wasm decoder beside the bundle", async () => {
+    const run = await extractCheck("ccitt-g4.pdf", readFileSync(join(ROOT, "test", "fixtures", "ccitt-g4.pdf")));
+    // Without jbig2.wasm: {"pages":1,"needsOcr":1,"images":0}.
     expect(run.stdout, run.stderr).toBe('{"pages":1,"needsOcr":1,"images":1}\n');
     expect(run.code, run.stderr).toBe(0);
   });

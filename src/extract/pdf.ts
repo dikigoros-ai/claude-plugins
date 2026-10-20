@@ -1,9 +1,10 @@
 // PDF extraction in Node, ported from extractPdf in dikigoros-ai/dikigoros-ai lib/matter-extract.ts
 // @ 37f39ac5 (2026-10-19): pdf.js reads each page's text layer, and a page without usable text is
-// rendered 1600 px wide and kept as a JPEG for OCR, unless the render is a blank sheet. The canvas
-// module is passed in because it is installed on first use (src/native). pdf.js looks for
-// @napi-rs/canvas beside its own file, which in the bundle is not there, so it gets the module's
-// canvases through a factory, and the module's constructors as globals set before it is imported.
+// rendered 1600 px wide (smaller for a page so tall that the image would pass MAX_RASTER_PIXELS) and
+// kept as a JPEG for OCR, unless the render is a blank sheet. The canvas module is passed in because
+// it is installed on first use (src/native). pdf.js looks for @napi-rs/canvas beside its own file,
+// which in the bundle is not there, so it gets the module's canvases through a factory, and the
+// module's constructors as globals set before it is imported.
 
 import type * as Pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -33,6 +34,12 @@ type CanvasFactoryClass = new (opts?: { enableHWA?: boolean }) => {
 
 const OCR_WIDTH_PX = 1600;
 const JPEG_QUALITY = 80; // of 100; the browser encodes at 0.8
+
+/**
+ * The most pixels a page is rendered with: 100 MB of canvas. A page tall and narrow enough that
+ * 1600 px wide would pass it (a PDF page may be 14,400 pt long) is rendered smaller, the same shape.
+ */
+export const MAX_RASTER_PIXELS = 25_000_000;
 
 let pdfjsLoaded: Promise<typeof Pdfjs> | undefined;
 
@@ -101,7 +108,9 @@ export async function extractPdf(
     standardFontDataUrl: assets.standardFontDataUrl,
     CanvasFactory,
     // Errors only, here and in the worker: pdf.js warns about every flaw it works around (a
-    // repaired xref, a font fallback), and errors reach the caller as rejections anyway.
+    // repaired xref, a font fallback). An image it cannot decode (its wasm decoder missing, for one)
+    // is such a warning, not a rejection: the page then renders blank and the blank check drops its
+    // image without a word, which is why the tests and the smoke test decode a CCITT scan.
     verbosity: pdfjs.VerbosityLevel.ERRORS,
   });
   try {
@@ -135,12 +144,19 @@ export async function extractPdf(
   }
 }
 
-/** The page rendered 1600 px wide as a JPEG, or null when it rendered as an empty sheet. */
+/**
+ * The page rendered 1600 px wide as a JPEG, or at most MAX_RASTER_PIXELS large, the same shape; null
+ * when it rendered as an empty sheet.
+ */
 async function rasterise(
   page: PDFPageProxy,
   factory: InstanceType<CanvasFactoryClass>,
 ): Promise<Uint8Array | null> {
-  const viewport = page.getViewport({ scale: OCR_WIDTH_PX / page.getViewport({ scale: 1 }).width });
+  const { width, height } = page.getViewport({ scale: 1 });
+  let scale = OCR_WIDTH_PX / width;
+  if (width * scale * (height * scale) > MAX_RASTER_PIXELS) scale = Math.sqrt(MAX_RASTER_PIXELS / (width * height));
+  const viewport = page.getViewport({ scale });
+  // Rounded down, so that the canvas stays within MAX_RASTER_PIXELS.
   const target = factory.create(Math.floor(viewport.width), Math.floor(viewport.height));
   try {
     const { canvas, context } = target;

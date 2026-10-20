@@ -77,7 +77,7 @@ const SESSION: SessionLike = {
 };
 
 let tmp: string;
-/** The one path both calls name: a folder holding the six files below. */
+/** The one path both calls name: a folder holding the seven files below. */
 let folder: string;
 const files: Record<string, Uint8Array> = {};
 
@@ -87,6 +87,8 @@ beforeAll(async () => {
   await mkdir(folder);
   files["claim.pdf"] = textPdf(CLAIM_LINES);
   files["scan.pdf"] = imagePdf({ ink: true });
+  // A CCITT G4 scan, which pdf.js decodes with its JBIG2 wasm module.
+  files["ccitt-g4.pdf"] = await readFile(join(ROOT, "test", "fixtures", "ccitt-g4.pdf"));
   files["brief.docx"] = await makeDocx(BRIEF_PARAGRAPHS);
   files["notes.txt"] = new TextEncoder().encode(NOTES);
   files[".hidden.pdf"] = textPdf(["A dotfile in the folder, which the listing leaves out."]);
@@ -188,11 +190,16 @@ function bodiesOf(requests: RecordedRequest[], method: string, path: string): un
   return requests.filter((request) => request.method === method && request.path === path).map(({ body }) => body);
 }
 
+/** The URLs the store answered for the PUTs of `pathname` among `requests`, in the order they were sent. */
+function storedUrls(requests: RecordedRequest[], pathname: string): string[] {
+  return requests.filter((request) => request.blob?.pathname === pathname).map(({ answer }) => (answer as { url: string }).url);
+}
+
 /** The URL the store answered for its one PUT of `pathname` among `requests`. */
 function storedUrl(requests: RecordedRequest[], pathname: string): string {
-  const puts = requests.filter((request) => request.blob?.pathname === pathname);
-  expect(puts, pathname).toHaveLength(1);
-  return (puts[0].answer as { url: string }).url;
+  const urls = storedUrls(requests, pathname);
+  expect(urls, pathname).toHaveLength(1);
+  return urls[0];
 }
 
 /** Every request to the API carries the session's bearer; the store's PUTs carry a client token instead. */
@@ -209,12 +216,18 @@ function sha256(bytes: Uint8Array): string {
 }
 
 describe("upload_to_matter against the fake DIKIGOROS API", () => {
-  it("lists the four files to upload and the photo to skip, leaves the dotfile out and sends nothing about them", async () => {
+  it("lists the five files to upload and the photo to skip, leaves the dotfile out and sends nothing about them", async () => {
     const sent = fake.requests.length;
     const listing = await list();
     expect(listing.status).toBe("confirmation_required");
     // Sorted by name; .hidden.pdf has no row at all: a folder's listing leaves its dotfiles out.
-    const kinds: Record<string, string> = { "brief.docx": "docx", "claim.pdf": "pdf", "notes.txt": "text", "scan.pdf": "pdf" };
+    const kinds: Record<string, string> = {
+      "brief.docx": "docx",
+      "ccitt-g4.pdf": "pdf",
+      "claim.pdf": "pdf",
+      "notes.txt": "text",
+      "scan.pdf": "pdf",
+    };
     expect(listing.files).toEqual(
       Object.entries(kinds).map(([name, type]) => ({ name, size_bytes: files[name].byteLength, type })),
     );
@@ -231,13 +244,14 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     expect(fake.state.documents.size).toBe(0);
   });
 
-  it("on confirm uploads the four files the way the web uploader does, each to ready", async () => {
+  it("on confirm uploads the five files the way the web uploader does, each to ready", async () => {
     const sent = fake.requests.length;
     const report = await upload();
     const requests = fake.requests.slice(sent);
     expect(report.status).toBe("done");
     expect(report.results.map(({ name, status }) => [name, status])).toEqual([
       ["brief.docx", "ready"],
+      ["ccitt-g4.pdf", "ready"],
       ["claim.pdf", "ready"],
       ["notes.txt", "ready"],
       ["scan.pdf", "ready"],
@@ -249,23 +263,25 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
 
     // A client token for each blob, asked for with the event @vercel/blob/client sends its handleUploadUrl.
     expect(bodiesOf(requests, "POST", `${documents}/upload`)).toEqual(
-      ["brief.docx", "claim.pdf", "scan.pdf", "pages/p1.jpg"].map((name) => ({
+      ["brief.docx", "ccitt-g4.pdf", "pages/p1.jpg", "claim.pdf", "scan.pdf", "pages/p1.jpg"].map((name) => ({
         type: "blob.generate-client-token",
         payload: { pathname: prefix + name, clientPayload: null, multipart: false },
       })),
     );
 
-    // scan.pdf's one page, rendered for OCR: a JPEG in the store, named in the manifest under the matter's prefix.
+    // The one page of each scan, rendered for OCR: a JPEG in the store, named in the manifest under the
+    // matter's prefix. Both are page 1 of their document, and the store tells them apart by its suffix.
     const pagePuts = requests.filter((request) => request.blob?.pathname === `${prefix}pages/p1.jpg`);
-    expect(pagePuts).toHaveLength(1);
-    expect(pagePuts[0].blob?.sizeBytes).toBeGreaterThan(2048);
-    const imageBlobKey = storedUrl(requests, `${prefix}pages/p1.jpg`);
-    expect(imageBlobKey.startsWith(STORE + prefix)).toBe(true);
+    expect(pagePuts).toHaveLength(2);
+    for (const put of pagePuts) expect(put.blob?.sizeBytes).toBeGreaterThan(2048);
+    const [ccittPage, scanPage] = storedUrls(requests, `${prefix}pages/p1.jpg`);
+    for (const url of [ccittPage, scanPage]) expect(url.startsWith(STORE + prefix)).toBe(true);
+    expect(ccittPage).not.toBe(scanPage);
 
     // Each original registered at the URL the store gave it, with its own hash, size and first bytes.
     const created = bodiesOf(requests, "POST", documents);
     expect(created).toEqual(
-      ["brief.docx", "claim.pdf", "scan.pdf"].map((name) => ({
+      ["brief.docx", "ccitt-g4.pdf", "claim.pdf", "scan.pdf"].map((name) => ({
         filename: name,
         mimeType: name.endsWith(".pdf") ? "application/pdf" : DOCX_MIME,
         sizeBytes: files[name].byteLength,
@@ -279,7 +295,9 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     // The manifests, each ingested into the document it was extracted for.
     const docIds = new Map(report.results.map(({ name, doc_id }) => [name, doc_id]));
     const manifest = (name: string) => bodiesOf(requests, "POST", `${documents}/${docIds.get(name)}/ingest`);
-    expect(manifest("scan.pdf")).toEqual([{ kind: "pdf", pages: [{ page: 1, text: "", needsOcr: true, imageBlobKey }] }]);
+    const scanned = (imageBlobKey: string) => [{ kind: "pdf", pages: [{ page: 1, text: "", needsOcr: true, imageBlobKey }] }];
+    expect(manifest("ccitt-g4.pdf")).toEqual(scanned(ccittPage));
+    expect(manifest("scan.pdf")).toEqual(scanned(scanPage));
     expect(manifest("claim.pdf")).toEqual([{ kind: "pdf", pages: [{ page: 1, text: CLAIM_TEXT, needsOcr: false }] }]);
     expect(manifest("brief.docx")).toEqual([{ kind: "docx", fullText: BRIEF_TEXT }]);
 
@@ -287,11 +305,12 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     expect(bodiesOf(requests, "POST", `${documents}/text`)).toEqual([{ filename: "notes.txt", text: NOTES_TEXT }]);
   });
 
-  it("a second confirmed call reports the four files as duplicates of the documents the first one made", async () => {
+  it("a second confirmed call reports the five files as duplicates of the documents the first one made", async () => {
     const first = await upload();
     const second = await upload();
     expect(second.results.map(({ name, status }) => [name, status])).toEqual([
       ["brief.docx", "duplicate"],
+      ["ccitt-g4.pdf", "duplicate"],
       ["claim.pdf", "duplicate"],
       ["notes.txt", "duplicate"],
       ["scan.pdf", "duplicate"],

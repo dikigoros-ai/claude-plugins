@@ -291,4 +291,6 @@ build. The routes the helper assumes: [docs/assumed-routes.md](docs/assumed-rout
 
 ## Licence
 
-MIT; see [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE). The bundled server holds code of other projects, under their own licences:
+`plugins/dikigoros/server/THIRD_PARTY_NOTICES.md` lists them, and `dikigoros-upload.mjs.LEGAL.txt` the licence
+comments of the bundled code.

@@ -1,19 +1,23 @@
 # Lint, typecheck, build and test on every push and pull request. The last
-# step proves the committed plugin bundle under plugins/ matches a fresh build.
+# step proves the committed plugin bundle under plugins/ matches a fresh build:
+# no file under plugins/ changed, and none the build made is left uncommitted.
 name: CI
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Lint, typecheck, build, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -34,4 +38,6 @@ jobs:
         run: npm test
 
       - name: The committed bundle matches the build
-        run: git diff --exit-code -- plugins/
+        run: |
+          git status --porcelain -- plugins/
+          test -z "$(git status --porcelain -- plugins/)"

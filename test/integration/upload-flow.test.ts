@@ -39,14 +39,16 @@ const assets: PdfAssets = {
 const STORE = "https://teststore.private.blob.vercel-storage.com/";
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+/** The claim's file name: Greek letters, spaces, a dot and parentheses, verbatim all the way to the store. */
+const CLAIM = "Αγωγή αρ. 5 (αντίγραφο).pdf";
 const CLAIM_LINES = ["The first page of the claim carries a text layer", "long enough to need no OCR."];
-/** claim.pdf's page as pdf.js reads it: the two lines joined by a space. */
+/** The claim's page as pdf.js reads it: the two lines joined by a space. */
 const CLAIM_TEXT = "The first page of the claim carries a text layer long enough to need no OCR.";
 const BRIEF_PARAGRAPHS = ["ΥΠΟΜΝΗΜΑ", "Το υπόμνημα της εναγομένης, σε δύο παραγράφους."];
 /** brief.docx as mammoth reads it: each paragraph followed by a blank line. */
 const BRIEF_TEXT = "ΥΠΟΜΝΗΜΑ\n\nΤο υπόμνημα της εναγομένης, σε δύο παραγράφους.\n\n";
 /** notes.txt as written: UTF-8 Greek with a byte-order mark, CRLF line ends and a trailing blank line. */
-const NOTES = "﻿Σημειώσεις από τη συνάντηση.\r\nΕπόμενη δικάσιμος: 12 Νοεμβρίου.\r\n\r\n";
+const NOTES = "\uFEFFΣημειώσεις από τη συνάντηση.\r\nΕπόμενη δικάσιμος: 12 Νοεμβρίου.\r\n\r\n";
 /** notes.txt as the text route must receive it: no BOM, LF line ends, the ends trimmed. */
 const NOTES_TEXT = "Σημειώσεις από τη συνάντηση.\nΕπόμενη δικάσιμος: 12 Νοεμβρίου.";
 
@@ -84,7 +86,7 @@ beforeAll(async () => {
   tmp = await mkdtemp(join(tmpdir(), "dikigoros-upload-flow-"));
   folder = join(tmp, "files");
   await mkdir(folder);
-  files["claim.pdf"] = textPdf(CLAIM_LINES);
+  files[CLAIM] = textPdf(CLAIM_LINES);
   files["scan.pdf"] = imagePdf({ ink: true });
   // A CCITT G4 scan, which pdf.js decodes with its JBIG2 wasm module.
   files["ccitt-g4.pdf"] = await readFile(join(ROOT, "test", "fixtures", "ccitt-g4.pdf"));
@@ -220,13 +222,13 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     const sent = fake.requests.length;
     const listing = await list();
     expect(listing.status).toBe("confirmation_required");
-    // Sorted by name; .hidden.pdf has no row at all: a folder's listing leaves its dotfiles out.
+    // Sorted by name, the Greek one last; .hidden.pdf has no row at all: a folder's listing leaves its dotfiles out.
     const kinds: Record<string, string> = {
       "brief.docx": "docx",
       "ccitt-g4.pdf": "pdf",
-      "claim.pdf": "pdf",
       "notes.txt": "text",
       "scan.pdf": "pdf",
+      [CLAIM]: "pdf",
     };
     expect(listing.files).toEqual(
       Object.entries(kinds).map(([name, type]) => ({ name, size_bytes: files[name].byteLength, type })),
@@ -252,9 +254,9 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     expect(report.results.map(({ name, status }) => [name, status])).toEqual([
       ["brief.docx", "ready"],
       ["ccitt-g4.pdf", "ready"],
-      ["claim.pdf", "ready"],
       ["notes.txt", "ready"],
       ["scan.pdf", "ready"],
+      [CLAIM, "ready"],
     ]);
     expectTheBearerOnEveryApiRequest();
 
@@ -263,7 +265,7 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
 
     // A client token for each blob, asked for with the event @vercel/blob/client sends its handleUploadUrl.
     expect(bodiesOf(requests, "POST", `${documents}/upload`)).toEqual(
-      ["brief.docx", "ccitt-g4.pdf", "pages/p1.jpg", "claim.pdf", "scan.pdf", "pages/p1.jpg"].map((name) => ({
+      ["brief.docx", "ccitt-g4.pdf", "pages/p1.jpg", "scan.pdf", "pages/p1.jpg", CLAIM].map((name) => ({
         type: "blob.generate-client-token",
         payload: { pathname: prefix + name, clientPayload: null, multipart: false },
       })),
@@ -281,7 +283,7 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     // Each original registered at the URL the store gave it, with its own hash, size and first bytes.
     const created = bodiesOf(requests, "POST", documents);
     expect(created).toEqual(
-      ["brief.docx", "ccitt-g4.pdf", "claim.pdf", "scan.pdf"].map((name) => ({
+      ["brief.docx", "ccitt-g4.pdf", "scan.pdf", CLAIM].map((name) => ({
         filename: name,
         mimeType: name.endsWith(".pdf") ? "application/pdf" : DOCX_MIME,
         sizeBytes: files[name].byteLength,
@@ -291,6 +293,10 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
       })),
     );
     for (const body of created) expect((body as { sha256: string }).sha256).toMatch(/^[0-9a-f]{64}$/);
+    // The Greek name, its spaces and parentheses went to the store as they are, and came back in the URL
+    // registered for it: decoded, its path is the matter's prefix and the name, then the store's suffix.
+    const claimUrl = storedUrl(requests, prefix + CLAIM);
+    expect(decodeURIComponent(new URL(claimUrl).pathname).startsWith(`/${prefix}${CLAIM}-`)).toBe(true);
 
     // The manifests, each ingested into the document it was extracted for.
     const docIds = new Map(report.results.map(({ name, doc_id }) => [name, doc_id]));
@@ -298,7 +304,7 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     const scanned = (imageBlobKey: string) => [{ kind: "pdf", pages: [{ page: 1, text: "", needsOcr: true, imageBlobKey }] }];
     expect(manifest("ccitt-g4.pdf")).toEqual(scanned(ccittPage));
     expect(manifest("scan.pdf")).toEqual(scanned(scanPage));
-    expect(manifest("claim.pdf")).toEqual([{ kind: "pdf", pages: [{ page: 1, text: CLAIM_TEXT, needsOcr: false }] }]);
+    expect(manifest(CLAIM)).toEqual([{ kind: "pdf", pages: [{ page: 1, text: CLAIM_TEXT, needsOcr: false }] }]);
     expect(manifest("brief.docx")).toEqual([{ kind: "docx", fullText: BRIEF_TEXT }]);
 
     // notes.txt goes as its normalised text, with no blob and no ingest.
@@ -311,9 +317,9 @@ describe("upload_to_matter against the fake DIKIGOROS API", () => {
     expect(second.results.map(({ name, status }) => [name, status])).toEqual([
       ["brief.docx", "duplicate"],
       ["ccitt-g4.pdf", "duplicate"],
-      ["claim.pdf", "duplicate"],
       ["notes.txt", "duplicate"],
       ["scan.pdf", "duplicate"],
+      [CLAIM, "duplicate"],
     ]);
     expect(second.results.map(({ doc_id }) => doc_id)).toEqual(first.results.map(({ doc_id }) => doc_id));
     expectTheBearerOnEveryApiRequest();

@@ -79,3 +79,26 @@ describe("the marketplace and the plugin manifest", () => {
     expect(entry()).not.toHaveProperty("userConfig");
   });
 });
+
+describe("the third-party notices beside the bundle", () => {
+  const notices = () => readFileSync(join(PLUGIN_ROOT, "server", "THIRD_PARTY_NOTICES.md"), "utf8");
+  /** "## name@version — licence": a package's heading, not a line of a licence text that starts the same. */
+  const headings = () =>
+    notices()
+      .split("\n")
+      .filter((line) => /^## \S+@\S+ — /.test(line));
+
+  it("give each bundled package a section, name@version and its licence, in order", () => {
+    for (const name of ["pdfjs-dist", "@modelcontextprotocol/server", "@vercel/blob", "mammoth", "zod", "tar"]) {
+      expect(headings().some((heading) => heading.startsWith(`## ${name}@`)), name).toBe(true);
+    }
+    expect(headings()).toContain("## pdfjs-dist@6.4.299 — Apache-2.0");
+    expect(headings()).toEqual([...headings()].sort());
+  });
+
+  it("start with pdf.js's own notice, which the minified bundle drops, while its worker keeps it at its top", () => {
+    expect(notices().indexOf(" * @licstart")).toBeLessThan(notices().indexOf("\n## "));
+    expect(notices()).toMatch(/Copyright \d{4} Mozilla Foundation/);
+    expect(readFileSync(join(PLUGIN_ROOT, "server", "pdf.worker.min.mjs"), "utf8")).toMatch(/^\/\*\*\n \* @licstart/);
+  });
+});

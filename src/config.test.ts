@@ -53,7 +53,7 @@ it.each([
 });
 
 it.each([
-  "https://dikigoros.example.vercel.app", // a deployment of the app, not its origin
+  "https://dikigoros.example.vercel.app", // a deployment host, not the app's origin
   "http://localhost:3001",
   "https://dikigoros.ai//", // one trailing slash is dropped, not two
   "https://dikigoros.ai/mcp",

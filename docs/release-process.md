@@ -48,24 +48,25 @@ claude plugin validate ./plugins/dikigoros
 claude plugin validate .
 ```
 
-`npm run build` regenerates `plugins/dikigoros/server/`: the bundle, its licence notices, and pdf.js's worker, wasm
-decoders and standard fonts. The same inputs give the same bytes. `npm run check` runs lint, the typecheck and the
-tests; the smoke test starts the bundle just built.
+`npm run build` regenerates `plugins/dikigoros/server/`: the bundle, its licence notices (the licence comments
+esbuild keeps, and `THIRD_PARTY_NOTICES.md`: pdf.js's own notice and the licence of every package the bundle holds
+code of), and pdf.js's worker, wasm decoders and standard fonts. The same inputs give the same bytes. `npm run check`
+runs lint, the typecheck and the tests; the smoke test starts the bundle just built.
 
 ## 4. Commit and tag
 
-Commit the version bump together with the regenerated `plugins/` output and the changelog. Check that
-`git status -- plugins/` shows nothing left out: the CI guard below compares tracked files only, so a file the build
-added and nobody committed passes it unseen. Tag the release commit `v<version>`, for example `v0.1.0`.
+Commit the version bump together with the regenerated `plugins/` output and the changelog: every file the build
+changed or added, as the CI guard below fails on either. Tag the release commit `v<version>`, for example `v0.1.0`.
 
 Commits are made through the GitHub API, which signs them (house rule).
 
 ## 5. CI
 
-`.github/workflows/ci.yml` runs on every push and pull request: `npm ci`, lint, typecheck, `npm run build`, the
-tests, then `git diff --exit-code -- plugins/`. That last step is the guard: it fails when the committed `plugins/`
-output differs from a fresh build, so a change to `src/` committed without its bundle cannot pass, and neither can a
-hand edit of the bundle.
+`.github/workflows/ci.yml` runs on every push and pull request, with read access to the repository only and its
+actions pinned to commits: `npm ci`, lint, typecheck, `npm run build`, the tests, then `git status --porcelain --
+plugins/`, which must print nothing. That last step is the guard: it fails when the committed `plugins/` output
+differs from a fresh build or misses a file the build made, so a change to `src/` committed without its bundle cannot
+pass, and neither can a hand edit of the bundle.
 
 ## 6. How installed clients update
 

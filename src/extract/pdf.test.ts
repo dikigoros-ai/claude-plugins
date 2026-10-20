@@ -6,13 +6,22 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { blankPdf, imagePdf, textPdf, twoPagePdf } from "../../test/support/pdf-fixtures";
+import { blankPdf, imagePdf, pathPdf, textPdf, twoPagePdf } from "../../test/support/pdf-fixtures";
 import type { CanvasLike, CanvasModule } from "../native/load";
 import { createCanvasFactory, extractPdf, type PdfAssets } from "./pdf";
 
 const require = createRequire(import.meta.url);
 const napi = require("@napi-rs/canvas") as typeof NapiCanvas;
-const canvas: CanvasModule = napi;
+const fsPromises = require("node:fs/promises") as typeof import("node:fs/promises");
+// The module's constructors behind stand-ins of their own identity. Here pdf.js's own require of
+// @napi-rs/canvas works (in the bundle it does not) and would install napi's constructors itself,
+// so only the stand-ins show that extractPdf installed the module's.
+const canvas: CanvasModule = {
+  ...napi,
+  DOMMatrix: new Proxy(napi.DOMMatrix, {}),
+  Path2D: new Proxy(napi.Path2D, {}),
+  ImageData: new Proxy(napi.ImageData, {}),
+};
 const pdfjsDir = dirname(require.resolve("pdfjs-dist/package.json"));
 const assets: PdfAssets = {
   workerSrc: pathToFileURL(join(pdfjsDir, "legacy", "build", "pdf.worker.min.mjs")).href,
@@ -50,15 +59,34 @@ describe("extractPdf", () => {
   });
 
   it("renders a page whose text layer is too thin to trust, its glyphs drawn from the standard fonts", async () => {
-    const warn = vi.spyOn(console, "warn"); // pdf.js warns when it cannot load the font data
+    const readFile = vi.spyOn(fsPromises, "readFile"); // how pdf.js reads the font data in Node
     try {
       const { pages, images } = await extractPdf(textPdf(["Exhibit A to the Statement of Claim"]), { canvas, assets });
       expect(pages).toEqual([{ page: 1, text: "Exhibit A to the Statement of Claim", needsOcr: true }]);
       expect([...images.keys()]).toEqual([1]);
-      expect(warn).not.toHaveBeenCalled();
+      // Helvetica's data; without it pdf.js would fall back to a system font, silently.
+      expect(readFile.mock.calls.map(([path]) => String(path))).toContain(
+        `${assets.standardFontDataUrl}LiberationSans-Regular.ttf`,
+      );
     } finally {
-      warn.mockRestore();
+      readFile.mockRestore();
     }
+  });
+
+  it("renders a page that only strokes a path", async () => {
+    const { pages, images } = await extractPdf(pathPdf(), { canvas, assets });
+    expect(pages).toEqual([{ page: 1, text: "", needsOcr: true }]);
+    expect([...images.keys()]).toEqual([1]);
+    const jpeg = images.get(1)!;
+    expect([jpeg[0], jpeg[1]]).toEqual([0xff, 0xd8]);
+  });
+
+  it("gives pdf.js the canvas module's DOMMatrix, Path2D and ImageData as globals", async () => {
+    await extractPdf(blankPdf(), { canvas, assets });
+    const globals = globalThis as Record<string, unknown>;
+    expect(globals.DOMMatrix).toBe(canvas.DOMMatrix);
+    expect(globals.Path2D).toBe(canvas.Path2D);
+    expect(globals.ImageData).toBe(canvas.ImageData);
   });
 
   it("keeps no image of a blank page, which still needs OCR", async () => {
@@ -90,6 +118,7 @@ describe("extractPdf", () => {
   it("makes every canvas, pdf.js's own included, with the canvas module it is given", async () => {
     const sizes: number[][] = [];
     const recording: CanvasModule = {
+      ...canvas,
       createCanvas: (width, height) => {
         sizes.push([width, height]);
         return canvas.createCanvas(width, height);
@@ -110,15 +139,16 @@ describe("extractPdf", () => {
     expect(pages[0].needsOcr).toBe(false);
   });
 
-  it("rejects bytes that are not a PDF", async () => {
-    // pdf.js warns "Indexing all PDF objects" before it gives up.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("rejects bytes that are not a PDF, printing nothing", async () => {
+    const printed = [vi.spyOn(console, "log"), vi.spyOn(console, "warn")];
     try {
       await expect(extractPdf(new TextEncoder().encode("not a pdf"), { canvas, assets })).rejects.toThrow(
         "Invalid PDF structure",
       );
+      // At its default verbosity pdf.js would warn "Indexing all PDF objects" before giving up.
+      for (const spy of printed) expect(spy).not.toHaveBeenCalled();
     } finally {
-      warn.mockRestore();
+      for (const spy of printed) spy.mockRestore();
     }
   });
 });

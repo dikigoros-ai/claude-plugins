@@ -1,11 +1,11 @@
 // PDF extraction in Node, ported from extractPdf in dikigoros-ai/dikigoros-ai lib/matter-extract.ts
 // @ 37f39ac5 (2026-10-19): pdf.js reads each page's text layer, and a page without usable text is
 // rendered 1600 px wide and kept as a JPEG for OCR, unless the render is a blank sheet. The canvas
-// module is passed in because it is installed on first use (src/native), and pdf.js makes every
-// canvas through it: pdf.js's own Node canvas factory requires @napi-rs/canvas from beside pdf.js,
-// which in the bundle is not there.
+// module is passed in because it is installed on first use (src/native). pdf.js looks for
+// @napi-rs/canvas beside its own file, which in the bundle is not there, so it gets the module's
+// canvases through a factory, and the module's constructors as globals set before it is imported.
 
-import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
+import type * as Pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { CanvasContextLike, CanvasLike, CanvasModule } from "../native/load";
 import { classifyPage, isBlankRaster, joinPdfTextItems } from "./classify";
@@ -33,6 +33,24 @@ type CanvasFactoryClass = new (opts?: { enableHWA?: boolean }) => {
 
 const OCR_WIDTH_PX = 1600;
 const JPEG_QUALITY = 80; // of 100; the browser encodes at 0.8
+
+let pdfjsLoaded: Promise<typeof Pdfjs> | undefined;
+
+/**
+ * pdf.js, imported on first use. At import it polyfills DOMMatrix and Path2D by requiring
+ * @napi-rs/canvas from beside its own file; in the bundle that fails, and a page that draws a path
+ * then throws "Path2D is not defined". So the canvas module's constructors are installed first.
+ */
+function loadPdfjs(canvas: CanvasModule): Promise<typeof Pdfjs> {
+  if (!pdfjsLoaded) {
+    const globals = globalThis as Record<string, unknown>;
+    globals.DOMMatrix ??= canvas.DOMMatrix;
+    globals.Path2D ??= canvas.Path2D;
+    globals.ImageData ??= canvas.ImageData;
+    pdfjsLoaded = import("pdfjs-dist/legacy/build/pdf.mjs");
+  }
+  return pdfjsLoaded;
+}
 
 /** pdf.js's BaseCanvasFactory, making its canvases with the given module. */
 export function createCanvasFactory(canvas: CanvasModule): CanvasFactoryClass {
@@ -71,9 +89,10 @@ export async function extractPdf(
   opts: { canvas: CanvasModule; assets: PdfAssets; onProgress?: (page: number, total: number) => void },
 ): Promise<ExtractedPdf> {
   const { assets, onProgress } = opts;
-  const CanvasFactory = createCanvasFactory(opts.canvas);
+  const pdfjs = await loadPdfjs(opts.canvas);
   // pdf.js imports the worker module at the first getDocument and keeps it for the process.
   pdfjs.GlobalWorkerOptions.workerSrc = assets.workerSrc;
+  const CanvasFactory = createCanvasFactory(opts.canvas);
   const task = pdfjs.getDocument({
     // A copy, as a plain Uint8Array: pdf.js takes over the buffer it is given (it is detached),
     // and it refuses a Node Buffer, which is what fs.readFile returns.
@@ -81,6 +100,9 @@ export async function extractPdf(
     wasmUrl: assets.wasmUrl,
     standardFontDataUrl: assets.standardFontDataUrl,
     CanvasFactory,
+    // Errors only, here and in the worker: pdf.js warns about every flaw it works around (a
+    // repaired xref, a font fallback), and errors reach the caller as rejections anyway.
+    verbosity: pdfjs.VerbosityLevel.ERRORS,
   });
   try {
     const doc = await task.promise;

@@ -31,6 +31,11 @@ export function blankPdf(): Uint8Array {
   return buildPdf([() => ({ size: LETTER, resources: "<< >>", content: "" })]);
 }
 
+/** One Letter page that strokes a thick black line and shows no text. */
+export function pathPdf(): Uint8Array {
+  return buildPdf([() => ({ size: LETTER, resources: "<< >>", content: "10 w 50 400 m 550 400 l S" })]);
+}
+
 /** A text page followed by an inked scan. */
 export function twoPagePdf(): Uint8Array {
   return buildPdf([

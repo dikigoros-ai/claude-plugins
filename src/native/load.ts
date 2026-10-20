@@ -20,6 +20,10 @@ export interface CanvasLike {
 
 export interface CanvasModule {
   createCanvas(width: number, height: number): CanvasLike;
+  /** Constructors pdf.js needs as globals; src/extract/pdf.ts installs them. */
+  DOMMatrix: unknown;
+  Path2D: unknown;
+  ImageData: unknown;
 }
 
 export function loadCanvasModule(nodeModulesDir: string): CanvasModule {

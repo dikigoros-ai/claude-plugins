@@ -96,31 +96,46 @@ const PLAN: UploadPlan = {
   emptyPaths: [EMPTY_FOLDER],
 };
 
-/** PLAN as the first call shows it. */
+/** The digest sentence of a listing whose plan uploads `count` files. */
+const confirmWith = (digest: string, count: number) =>
+  `Nothing has been uploaded. Call again with confirm: true and plan_digest "${digest}" to upload the ${count} file(s) marked upload.`;
+
+/** PLAN as the first call shows it, matter 7 holding 3 documents of the plan's 50. */
 const LISTING = [
+  confirmWith("3f2a9c0d1e4b5a67", 3),
   "claim.pdf · 47.1 KB · pdf · upload",
   "υπεράσπιση.docx · 20.0 KB · docx · upload",
-  "photo.jpg · 1.2 MB · — · skip (unsupported_type)",
   "σημείωμα.txt · 512 B · text · upload",
+  "photo.jpg · 1.2 MB · — · skip (unsupported_type)",
   "missing.pdf · — · — · skip (not_found)",
   "/Users/eleni/Matters/Empty: no eligible files",
-  'Nothing has been uploaded. Call again with confirm: true and plan_digest "3f2a9c0d1e4b5a67" to upload the 3 file(s) marked upload.',
+  'Matter #7 "Γεωργίου v Πέτρου": 3 of 50 documents',
 ].join("\n");
 
+/** The files PLAN uploads, and what it skips. */
 const FILES = [
-  { name: "claim.pdf", path: `${FOLDER}/claim.pdf`, size_bytes: 48_213, type: "pdf", decision: "upload" },
-  { name: "υπεράσπιση.docx", path: `${FOLDER}/υπεράσπιση.docx`, size_bytes: 20_480, type: "docx", decision: "upload" },
-  {
-    name: "photo.jpg",
-    path: `${FOLDER}/photo.jpg`,
-    size_bytes: 1_258_291,
-    type: null,
-    decision: "skip",
-    reason: "unsupported_type",
-  },
-  { name: "σημείωμα.txt", path: `${FOLDER}/σημείωμα.txt`, size_bytes: 512, type: "text", decision: "upload" },
-  { name: "missing.pdf", path: MISSING.path, size_bytes: 0, type: null, decision: "skip", reason: "not_found" },
+  { name: "claim.pdf", size_bytes: 48_213, type: "pdf" },
+  { name: "υπεράσπιση.docx", size_bytes: 20_480, type: "docx" },
+  { name: "σημείωμα.txt", size_bytes: 512, type: "text" },
 ];
+const SKIPPED = {
+  shown: [
+    { name: "photo.jpg", reason: "unsupported_type" },
+    { name: "missing.pdf", reason: "not_found" },
+  ],
+  counts: { unsupported_type: 1, not_found: 1 },
+};
+const MATTER_FACTS = { id: 7, title: "Γεωργίου v Πέτρου", document_count: 3, document_limit: 50 };
+
+/** PLAN's listing as structured content. */
+const listed = (status: string) => ({
+  status,
+  plan_digest: "3f2a9c0d1e4b5a67",
+  files: FILES,
+  skipped: SKIPPED,
+  empty_paths: [EMPTY_FOLDER],
+  matter: MATTER_FACTS,
+});
 
 /** What the pipeline makes of each planned file. */
 const OUTCOMES: Record<string, DocumentOutcome> = {
@@ -331,26 +346,24 @@ describe.each([
 });
 
 describe("upload_to_matter: the listing", () => {
-  it.each([{ confirm: undefined }, { confirm: false }])(
-    "lists what would be uploaded and uploads nothing (confirm: $confirm)",
-    async ({ confirm }) => {
-      const f = fakes();
-      const result = await call(handleUploadToMatter, { matter_id: 7, paths: PATHS, confirm }, f.deps);
+  it.each([
+    { what: "without confirm", confirm: undefined },
+    { what: "with confirm: false", confirm: false },
+    { what: "with confirm: true but no plan_digest", confirm: true },
+  ])("lists what would be uploaded and uploads nothing, $what", async ({ confirm }) => {
+    const f = fakes();
+    const result = await call(handleUploadToMatter, { matter_id: 7, paths: PATHS, confirm }, f.deps);
 
-      expect(result).toEqual({
-        content: [{ type: "text", text: LISTING }],
-        structuredContent: {
-          status: "confirmation_required",
-          plan_digest: "3f2a9c0d1e4b5a67",
-          files: FILES,
-          empty_paths: [EMPTY_FOLDER],
-        },
-      });
-      expect(result.isError).toBeUndefined();
-      expect(f.resolvePlan.mock.calls).toEqual([[PATHS]]);
-      expect(f.calls).toEqual(["getAccessToken", "resolvePlan"]);
-    },
-  );
+    expect(result).toEqual({
+      content: [{ type: "text", text: LISTING }],
+      structuredContent: listed("confirmation_required"),
+    });
+    expect(result.isError).toBeUndefined();
+    expect(f.resolvePlan.mock.calls).toEqual([[PATHS]]);
+    // The account and the matter first, so that a matter that is not there is said before any list.
+    expect(f.calls).toEqual(["getAccessToken", "currentUser", "getMatter(7)", "resolvePlan"]);
+    expect(f.upload).not.toHaveBeenCalled();
+  });
 
   it("lists the files again, uploading nothing, when they changed since the listing confirmed", async () => {
     const f = fakes();
@@ -359,15 +372,71 @@ describe("upload_to_matter: the listing", () => {
 
     expect(result).toEqual({
       content: [{ type: "text", text: `The files have changed since they were listed.\n${LISTING}` }],
-      structuredContent: {
-        status: "plan_changed",
-        plan_digest: "3f2a9c0d1e4b5a67",
-        files: FILES,
-        empty_paths: [EMPTY_FOLDER],
-      },
+      structuredContent: listed("plan_changed"),
     });
     expect(result.isError).toBeUndefined();
-    expect(f.calls).toEqual(["getAccessToken", "resolvePlan"]);
+    expect(f.calls).toEqual(["getAccessToken", "currentUser", "getMatter(7)", "resolvePlan"]);
+    expect(f.upload).not.toHaveBeenCalled();
+  });
+
+  it("gives a plan without a limit of documents per matter as ∞", async () => {
+    const me = { ...ME, entitlements: { ...ME.entitlements, docsPerMatter: -1 } };
+    const f = fakes({ me, matter: matterHolding(900) });
+    const result = await call(handleUploadToMatter, { matter_id: 7, paths: PATHS }, f.deps);
+
+    expect(textOf(result).split("\n").at(-1)).toBe('Matter #7 "Γεωργίου v Πέτρου": 900 of ∞ documents');
+    expect(result.structuredContent).toMatchObject({
+      matter: { ...MATTER_FACTS, document_count: 900, document_limit: null },
+    });
+  });
+
+  it("names the files it uploads, at most 25 that it skips, and counts the rest of those by reason", async () => {
+    // A Downloads folder: 2,700 photos, 100 PDFs that fill the plan, and 200 more the cap leaves unseen.
+    const photos = Array.from({ length: 2700 }, (_, i): PlanEntry => ({
+      ...inFolder(`IMG_${String(i).padStart(4, "0")}.jpg`),
+      sizeBytes: 2_400_000,
+      kind: null,
+      decision: "skip",
+      reason: "unsupported_type",
+    }));
+    const pdfs = Array.from({ length: 100 }, (_, i): PlanEntry => ({
+      ...inFolder(`scan-${String(i).padStart(3, "0")}.pdf`),
+      sizeBytes: 48_213,
+      kind: "pdf",
+      decision: "upload",
+    }));
+    const capped = Array.from({ length: 200 }, (_, i): PlanEntry => ({
+      ...inFolder(`scan-${String(100 + i).padStart(3, "0")}.pdf`),
+      realPath: "",
+      sizeBytes: 0,
+      kind: null,
+      decision: "skip",
+      reason: "too_many_files",
+    }));
+    const plan: UploadPlan = { entries: [...photos, ...pdfs, ...capped], digest: "9c41d0e2b7a35f86", emptyPaths: [] };
+    const f = fakes({ plan });
+    const result = await call(handleUploadToMatter, { matter_id: 7, paths: [FOLDER] }, f.deps);
+
+    const lines = textOf(result).split("\n");
+    expect(lines[0]).toBe(confirmWith("9c41d0e2b7a35f86", 100));
+    expect(lines.slice(1, 101)).toEqual(pdfs.map(({ name }) => `${name} · 47.1 KB · pdf · upload`));
+    expect(lines.slice(101, 126)).toEqual(photos.slice(0, 25).map(({ name }) => `${name} · 2.3 MB · — · skip (unsupported_type)`));
+    expect(lines.slice(126)).toEqual([
+      "… and 2,675 more skipped (unsupported_type)",
+      "… and 200 more skipped (too_many_files)",
+      'Matter #7 "Γεωργίου v Πέτρου": 3 of 50 documents',
+    ]);
+    expect(result.structuredContent).toEqual({
+      status: "confirmation_required",
+      plan_digest: "9c41d0e2b7a35f86",
+      files: pdfs.map(({ name }) => ({ name, size_bytes: 48_213, type: "pdf" })),
+      skipped: {
+        shown: photos.slice(0, 25).map(({ name }) => ({ name, reason: "unsupported_type" })),
+        counts: { unsupported_type: 2700, too_many_files: 200 },
+      },
+      empty_paths: [],
+      matter: MATTER_FACTS,
+    });
   });
 
   it("has nothing to upload when the confirmed plan skips every file", async () => {
@@ -376,7 +445,71 @@ describe("upload_to_matter: the listing", () => {
     const result = await call(handleUploadToMatter, args, f.deps);
 
     expect(result).toStrictEqual({ content: [{ type: "text", text: "Nothing to upload." }] });
-    expect(f.calls).toEqual(["getAccessToken", "resolvePlan"]);
+    expect(f.calls).toEqual(["getAccessToken", "currentUser", "getMatter(7)", "resolvePlan"]);
+  });
+});
+
+describe.each([
+  { call: "the listing", args: { matter_id: 7, paths: PATHS } satisfies UploadToMatterArgs },
+  {
+    call: "the confirmed call",
+    args: { matter_id: 7, paths: PATHS, confirm: true, plan_digest: "3f2a9c0d1e4b5a67" } satisfies UploadToMatterArgs,
+  },
+])("upload_to_matter: the account and the matter, on $call", ({ args }) => {
+  it("answers with the plan sentence when the account's plan has no Matters", async () => {
+    const f = fakes({ me: { ...ME, entitlements: { ...ME.entitlements, mattersAccess: false } } });
+    const result = await call(handleUploadToMatter, args, f.deps);
+
+    expect(result).toStrictEqual(errorResult("This needs the Firm plan (Matters). Plans: https://dikigoros.ai/pricing"));
+    expect(f.calls).toEqual(["getAccessToken", "currentUser"]);
+  });
+
+  it("forgets a session the current-user route refuses, and answers with a new sign-in's prompt", async () => {
+    const f = fakes({ me: new ApiError(401, "Authentication required") });
+    const result = await call(handleUploadToMatter, args, f.deps);
+
+    expect(result).toStrictEqual(SIGN_IN);
+    expect(f.calls).toEqual(["getAccessToken", "currentUser", "forgetSession", "beginSignIn"]);
+  });
+
+  it("keeps the session on any other refusal of the current-user route, and answers with its sentence", async () => {
+    const f = fakes({ me: new ApiError(403, "account_suspended") });
+    const result = await call(handleUploadToMatter, args, f.deps);
+
+    expect(result).toStrictEqual(errorResult("This DIKIGOROS account has been suspended."));
+    expect(f.calls).toEqual(["getAccessToken", "currentUser"]);
+  });
+
+  it("answers with the API's sentence, before reading any file, when the matter is not the lawyer's", async () => {
+    const f = fakes({ matter: new ApiError(404, "Not found") });
+    const result = await call(handleUploadToMatter, args, f.deps);
+
+    expect(result).toStrictEqual(errorResult("Matter not found (or not yours)."));
+    expect(f.calls).toEqual(["getAccessToken", "currentUser", "getMatter(7)"]);
+  });
+
+  it.each([
+    { what: "the current-user request gets no answer", setup: { me: new TypeError("fetch failed") }, line: "fetch failed" },
+    {
+      what: "the matter's address does not resolve",
+      setup: { matter: new Error("getaddrinfo ENOTFOUND dikigoros.ai\n    at GetAddrInfoReqWrap.onlookupall (node:dns:120:26)") },
+      line: "getaddrinfo ENOTFOUND dikigoros.ai",
+    },
+    {
+      what: "the sign-in service fails the refresh after a 401",
+      setup: { matter: new DeviceFlowError("http_503", "http_503", 503) },
+      line: "http_503",
+    },
+  ])("says DIKIGOROS could not be reached, and nothing was uploaded, when $what", async ({ setup, line }) => {
+    const f = fakes(setup);
+    const result = await call(handleUploadToMatter, args, f.deps);
+
+    expect(result).toStrictEqual(
+      errorResult(`Could not reach DIKIGOROS (${line}). Nothing was uploaded; try again in a moment.`),
+    );
+    expect(f.resolvePlan).not.toHaveBeenCalled();
+    expect(f.upload).not.toHaveBeenCalled();
+    expect(f.session.forgetSession).not.toHaveBeenCalled();
   });
 });
 
@@ -397,9 +530,9 @@ describe("upload_to_matter: the confirmed call", () => {
 
     expect(f.calls).toEqual([
       "getAccessToken",
-      "resolvePlan",
       "currentUser",
       "getMatter(7)",
+      "resolvePlan",
       "nativeRuntime",
       "upload(claim.pdf)",
       "upload(υπεράσπιση.docx)",
@@ -433,9 +566,10 @@ describe("upload_to_matter: the confirmed call", () => {
     expect(most).toBe(1);
   });
 
-  it("uploads on confirm alone, without a plan_digest, and with no role or side", async () => {
+  it("gives the uploads no role or side when the call names none", async () => {
     const f = fakes();
-    const result = await call(handleUploadToMatter, { matter_id: 7, paths: PATHS, confirm: true }, f.deps);
+    const args: UploadToMatterArgs = { matter_id: 7, paths: PATHS, confirm: true, plan_digest: PLAN.digest };
+    const result = await call(handleUploadToMatter, args, f.deps);
 
     expect(f.upload.mock.calls.map(([entry, ctx]) => [entry.name, ctx])).toEqual([
       ["claim.pdf", { baseUrl: "https://dikigoros.ai", userId: 42, matterId: 7 }],
@@ -462,7 +596,7 @@ describe("upload_to_matter: the confirmed call", () => {
     expect(result).toStrictEqual(
       errorResult("Matter #7 holds 48 of 50 documents; 3 more would exceed the limit. Nothing was uploaded."),
     );
-    expect(f.calls).toEqual(["getAccessToken", "resolvePlan", "currentUser", "getMatter(7)"]);
+    expect(f.calls).toEqual(["getAccessToken", "currentUser", "getMatter(7)", "resolvePlan"]);
   });
 
   it.each([
@@ -476,61 +610,6 @@ describe("upload_to_matter: the confirmed call", () => {
     expect(f.upload).toHaveBeenCalledTimes(3);
     expect(textOf(result)).toBe(DONE_TEXT);
   });
-
-  it("answers with the plan sentence when the account's plan has no Matters", async () => {
-    const f = fakes({ me: { ...ME, entitlements: { ...ME.entitlements, mattersAccess: false } } });
-    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
-
-    expect(result).toStrictEqual(errorResult("This needs the Firm plan (Matters). Plans: https://dikigoros.ai/pricing"));
-    expect(f.calls).toEqual(["getAccessToken", "resolvePlan", "currentUser"]);
-  });
-
-  it("forgets a session the current-user route refuses, and answers with a new sign-in's prompt", async () => {
-    const f = fakes({ me: new ApiError(401, "Authentication required") });
-    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
-
-    expect(result).toStrictEqual(SIGN_IN);
-    expect(f.calls).toEqual(["getAccessToken", "resolvePlan", "currentUser", "forgetSession", "beginSignIn"]);
-  });
-
-  it("keeps the session on any other refusal of the current-user route, and answers with its sentence", async () => {
-    const f = fakes({ me: new ApiError(403, "account_suspended") });
-    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
-
-    expect(result).toStrictEqual(errorResult("This DIKIGOROS account has been suspended."));
-    expect(f.calls).toEqual(["getAccessToken", "resolvePlan", "currentUser"]);
-  });
-
-  it("answers with the API's sentence when the matter is not the lawyer's", async () => {
-    const f = fakes({ matter: new ApiError(404, "Not found") });
-    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
-
-    expect(result).toStrictEqual(errorResult("Matter not found (or not yours)."));
-    expect(f.upload).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { what: "the current-user request gets no answer", setup: { me: new TypeError("fetch failed") }, line: "fetch failed" },
-    {
-      what: "the matter's address does not resolve",
-      setup: { matter: new Error("getaddrinfo ENOTFOUND dikigoros.ai\n    at GetAddrInfoReqWrap.onlookupall (node:dns:120:26)") },
-      line: "getaddrinfo ENOTFOUND dikigoros.ai",
-    },
-    {
-      what: "the sign-in service fails the refresh after a 401",
-      setup: { matter: new DeviceFlowError("http_503", "http_503", 503) },
-      line: "http_503",
-    },
-  ])("says DIKIGOROS could not be reached, and nothing was uploaded, when $what", async ({ setup, line }) => {
-    const f = fakes(setup);
-    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
-
-    expect(result).toStrictEqual(
-      errorResult(`Could not reach DIKIGOROS (${line}). Nothing was uploaded; try again in a moment.`),
-    );
-    expect(f.upload).not.toHaveBeenCalled();
-    expect(f.session.forgetSession).not.toHaveBeenCalled();
-  });
 });
 
 describe("upload_to_matter: the native runtime", () => {
@@ -540,13 +619,14 @@ describe("upload_to_matter: the native runtime", () => {
   it("is installed once, before any upload, and when it cannot be the PDFs alone fail", async () => {
     const failure = new Error("Download failed for @napi-rs/canvas: fetch failed\n    at download (install.ts:120)");
     const f = fakes({ plan: WITH_TWO_PDFS, runtime: failure });
-    const result = await call(handleUploadToMatter, { matter_id: 7, paths: [FOLDER], confirm: true }, f.deps);
+    const args: UploadToMatterArgs = { matter_id: 7, paths: [FOLDER], confirm: true, plan_digest: WITH_TWO_PDFS.digest };
+    const result = await call(handleUploadToMatter, args, f.deps);
 
     expect(f.calls).toEqual([
       "getAccessToken",
-      "resolvePlan",
       "currentUser",
       "getMatter(7)",
+      "resolvePlan",
       "nativeRuntime",
       "upload(υπεράσπιση.docx)",
     ]);
@@ -579,14 +659,15 @@ describe("upload_to_matter: the native runtime", () => {
 
   it("is not installed for a plan without a PDF", async () => {
     const f = fakes({ plan: { entries: [DEFENCE, NOTE], digest: "a1b2c3d4e5f60718", emptyPaths: [] } });
-    await call(handleUploadToMatter, { matter_id: 7, paths: [FOLDER], confirm: true }, f.deps);
+    const args: UploadToMatterArgs = { matter_id: 7, paths: [FOLDER], confirm: true, plan_digest: "a1b2c3d4e5f60718" };
+    await call(handleUploadToMatter, args, f.deps);
 
     expect(f.nativeRuntime).not.toHaveBeenCalled();
     expect(f.calls).toEqual([
       "getAccessToken",
-      "resolvePlan",
       "currentUser",
       "getMatter(7)",
+      "resolvePlan",
       "upload(υπεράσπιση.docx)",
       "upload(σημείωμα.txt)",
     ]);
@@ -687,8 +768,8 @@ describe("registerTools", () => {
   const UPLOAD_DESCRIPTION =
     "Use this when the lawyer asks to add files from this computer to a DIKIGOROS matter. Takes absolute paths " +
     "to .pdf, .docx, .txt or .md files, or to a folder (its top-level files). The first call lists what would be " +
-    "uploaded and uploads nothing; call again with confirm: true to upload. Not for files already in the matter, " +
-    "other file types, or for searching or reading matter documents.";
+    "uploaded and uploads nothing; call again with confirm: true and the plan_digest from that answer to upload. " +
+    "Not for files already in the matter, other file types, or for searching or reading matter documents.";
   const CREATE_DESCRIPTION =
     "Use this when the lawyer asks to open a new matter in DIKIGOROS, for example before uploading files to it. " +
     "Creates the matter with a title and optional type, case reference and description. Not for changing, " +

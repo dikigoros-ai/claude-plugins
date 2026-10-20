@@ -50,11 +50,12 @@ const NOTES = "﻿Σημειώσεις από τη συνάντηση.\r\nΕπό
 /** notes.txt as the text route must receive it: no BOM, LF line ends, the ends trimmed. */
 const NOTES_TEXT = "Σημειώσεις από τη συνάντηση.\nΕπόμενη δικάσιμος: 12 Νοεμβρίου.";
 
-/** What a listing says of each file, as structuredContent carries it. */
+/** What a listing says of the files, as structuredContent carries it. */
 interface Listing {
   status: string;
   plan_digest: string;
-  files: Array<{ name: string; decision: string; reason?: string }>;
+  files: Array<{ name: string; size_bytes: number; type: string }>;
+  skipped: { shown: Array<{ name: string; reason: string }>; counts: Record<string, number> };
 }
 
 /** What a confirmed call reports of each file. */
@@ -208,19 +209,24 @@ function sha256(bytes: Uint8Array): string {
 }
 
 describe("upload_to_matter against the fake DIKIGOROS API", () => {
-  it("lists the four files to upload and the photo to skip, leaves the dotfile out and sends nothing", async () => {
+  it("lists the four files to upload and the photo to skip, leaves the dotfile out and sends nothing about them", async () => {
     const sent = fake.requests.length;
     const listing = await list();
     expect(listing.status).toBe("confirmation_required");
     // Sorted by name; .hidden.pdf has no row at all: a folder's listing leaves its dotfiles out.
-    expect(listing.files).toEqual([
-      expect.objectContaining({ name: "brief.docx", decision: "upload" }),
-      expect.objectContaining({ name: "claim.pdf", decision: "upload" }),
-      expect.objectContaining({ name: "notes.txt", decision: "upload" }),
-      expect.objectContaining({ name: "photo.jpg", decision: "skip", reason: "unsupported_type" }),
-      expect.objectContaining({ name: "scan.pdf", decision: "upload" }),
+    const kinds: Record<string, string> = { "brief.docx": "docx", "claim.pdf": "pdf", "notes.txt": "text", "scan.pdf": "pdf" };
+    expect(listing.files).toEqual(
+      Object.entries(kinds).map(([name, type]) => ({ name, size_bytes: files[name].byteLength, type })),
+    );
+    expect(listing.skipped).toEqual({
+      shown: [{ name: "photo.jpg", reason: "unsupported_type" }],
+      counts: { unsupported_type: 1 },
+    });
+    // The account and the matter only: nothing about the files, and nothing to the store.
+    expect(fake.requests.slice(sent).map(({ method, path }) => `${method} ${path}`)).toEqual([
+      "GET /auth/current-user",
+      `GET /api/matters/${matterId}`,
     ]);
-    expect(fake.requests.slice(sent)).toEqual([]);
     expect(fake.state.blobs.size).toBe(0);
     expect(fake.state.documents.size).toBe(0);
   });

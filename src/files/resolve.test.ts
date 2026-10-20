@@ -1,6 +1,6 @@
 import { appendFile, chmod, mkdir, mkdtemp, realpath, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { MAX_FILE_BYTES, MAX_FILES_PER_CALL, type PlanEntry, planDigest, resolveUploadPlan } from "./resolve";
 
@@ -306,6 +306,64 @@ it("caps the upload list at MAX_FILES_PER_CALL (too_many_files)", async () => {
     "f000.txt: skip (duplicate_path)",
     `${name(MAX_FILES_PER_CALL)}: skip (too_many_files)`,
   ]);
+});
+
+it.skipIf(asRoot)("plans 100 of a folder's 150 PDFs and caps the other 50 without opening them (too_many_files)", async () => {
+  const name = (i: number) => `scan-${String(i).padStart(3, "0")}.pdf`;
+  for (let i = 0; i < MAX_FILES_PER_CALL + 50; i++) await put(join("bundle", name(i)), PDF);
+  const capped = Array.from({ length: 50 }, (_, i) => join(root, "bundle", name(MAX_FILES_PER_CALL + i)));
+
+  // Locked, they would be unreadable had they been opened.
+  await withLocked(capped, async () => {
+    const { entries } = await resolveUploadPlan([join(root, "bundle")]);
+
+    expect(entries.slice(0, MAX_FILES_PER_CALL).map((e) => e.decision)).toEqual(Array(MAX_FILES_PER_CALL).fill("upload"));
+    expect(entries.slice(MAX_FILES_PER_CALL)).toEqual(
+      capped.map((path) => ({
+        path,
+        realPath: "",
+        name: basename(path),
+        sizeBytes: 0,
+        kind: null,
+        decision: "skip",
+        reason: "too_many_files",
+      })),
+    );
+  });
+});
+
+it("past the cap looks at no candidate, but still tells a named path's file from its folder and lists the folder", async () => {
+  for (let i = 0; i < MAX_FILES_PER_CALL; i++) await put(join("full", `f${String(i).padStart(3, "0")}.txt`), `file ${i}`);
+  // Looked at, the dangling link would have no entry at all and the .doc would be unsupported_type.
+  await symlink(join(root, "gone.pdf"), join(root, "full", "zz-dangling.pdf"));
+  const legacy = await put("later/brief.doc", "a legacy Word file");
+  await put("more/a.pdf", PDF);
+  await put("more/.DS_Store", "x");
+
+  const { entries } = await resolveUploadPlan([
+    join(root, "full"),
+    legacy,
+    join(root, "more"),
+    join(root, "missing.pdf"),
+    "relative.pdf",
+  ]);
+
+  expect(decisions(entries.slice(MAX_FILES_PER_CALL))).toEqual([
+    "zz-dangling.pdf: skip (too_many_files)",
+    "brief.doc: skip (too_many_files)",
+    "a.pdf: skip (too_many_files)",
+    "missing.pdf: skip (not_found)",
+    "relative.pdf: skip (not_absolute)",
+  ]);
+  expect(entries[MAX_FILES_PER_CALL + 1]).toEqual({
+    path: legacy,
+    realPath: "",
+    name: "brief.doc",
+    sizeBytes: 0,
+    kind: null,
+    decision: "skip",
+    reason: "too_many_files",
+  });
 });
 
 it("digest changes when a planned file's size changes and ignores skipped entries", async () => {

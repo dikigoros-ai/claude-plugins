@@ -65,19 +65,22 @@ with musl (Alpine, for one) is not supported.
 
 ### The confirm step
 
-The first call lists what would be uploaded, one line per file (name · size · type · upload, or skip and why), and
-uploads nothing:
+The first call lists what would be uploaded and uploads nothing. It checks the account and the matter first, so a
+matter that is not there is said before any list. The list starts with how to confirm it, then has one line per file
+to upload (name · size · type · upload) and per file skipped (skip and why; past the first 25, the skipped files are
+counted by reason), and ends with the matter and how many documents it holds of the plan's limit:
 
 ```json
 { "matter_id": 12, "paths": ["/Users/you/Documents/Matter 12"] }
 ```
 
 ```
+Nothing has been uploaded. Call again with confirm: true and plan_digest "3f2a9c0d1e4b5a67" to upload the 3 file(s) marked upload.
 brief.docx · 20.0 KB · docx · upload
 claim.pdf · 47.1 KB · pdf · upload
 notes.txt · 512 B · text · upload
 photo.jpg · 1.2 MB · — · skip (unsupported_type)
-Nothing has been uploaded. Call again with confirm: true and plan_digest "3f2a9c0d1e4b5a67" to upload the 3 file(s) marked upload.
+Matter #12 "Georgiou v Petrou": 4 of 50 documents
 ```
 
 The second call, with `confirm: true` and that `plan_digest`, uploads the files marked upload one after another and
@@ -94,9 +97,9 @@ notes.txt: duplicate — This file is already in the matter (document #31).
 Matter #12: https://dikigoros.ai/matters/12
 ```
 
-If the files changed between the two calls (one added, removed or of another size), the second call uploads nothing
-and lists them again with a new `plan_digest`. Without a `plan_digest`, the second call uploads what the paths name
-at that moment.
+The `plan_digest` is required: `confirm: true` without one lists the files again and uploads nothing. If the files
+changed between the two calls (one added, removed or of another size), the second call uploads nothing and lists them
+again with a new `plan_digest`.
 
 Each file ends as one of:
 
@@ -173,8 +176,8 @@ the stored refresh token, the helper deletes the entry itself and answers with a
 | `upload_to_matter` with `confirm: true` | Each file's name, size, SHA-256 and first 8 bytes; its extracted text (the manifest); a `.txt` or `.md` file's text; the role and side, when given | `https://dikigoros.ai` |
 
 Every request to dikigoros.ai carries the access token. The first call of `upload_to_matter`, the listing, reads the
-files' names, sizes and first bytes on this computer and sends nothing about them. Nothing else leaves this
-computer: the helper sends no telemetry.
+files' names, sizes and first bytes on this computer and sends nothing about them: it asks dikigoros.ai for the
+account and the matter only. Nothing else leaves this computer: the helper sends no telemetry.
 
 ## Configuration
 
@@ -196,7 +199,8 @@ you run it yourself. A variable set to an empty value counts as unset.
 - File types: `.pdf`, `.docx`, `.txt` and `.md` only. A PDF or a DOCX must also start with that type's bytes; a file
   whose bytes contradict its extension is skipped.
 - At most 50 MB per file, and 200,000 characters per `.txt` or `.md` file. Empty files are skipped.
-- At most 50 paths and 100 files per call.
+- At most 50 paths and 100 files per call. The files past the 100th are skipped (`too_many_files`) without being
+  read, and a listing names at most 25 skipped files, counting the others by reason.
 - Paths must be absolute: a relative path, or one starting with `~`, is skipped (`not_absolute`).
 - A folder stands for the files directly in it: subfolders are not entered.
 - Dotfiles are skipped: a folder's are left out of the listing, and one named directly is listed as skipped.

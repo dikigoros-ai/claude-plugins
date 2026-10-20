@@ -36,11 +36,11 @@ export type SkipReason =
 export interface PlanEntry {
   /** The path as given; for a file listed from a directory, that directory as given followed by its name. */
   path: string;
-  /** Where `path` really leads, symlinks resolved; "" when it never resolved. */
+  /** Where `path` really leads, symlinks resolved; "" when it never resolved, or was capped unseen. */
   realPath: string;
   /** The basename of `path`, verbatim (Greek letters, spaces): the document's filename. */
   name: string;
-  /** From `stat`, so a symlink's target; 0 when the path never resolved. */
+  /** From `stat`, so a symlink's target; 0 when the path never resolved, or was capped unseen. */
   sizeBytes: number;
   /** What the accepted extension stands for; null for entries skipped before the extension check
    *  and for magic bytes that contradict it. */
@@ -66,28 +66,43 @@ export interface UploadPlan {
  * reason of the first check it fails: its real path stays inside the directory that was named (for a
  * named file, the one it sits in); not a dotfile; an accepted extension; not empty; at most
  * MAX_FILE_BYTES; its first bytes can be read and, for PDF/DOCX, agree with the extension; not
- * planned already; within MAX_FILES_PER_CALL. A named path that yields no entry is in `emptyPaths`.
+ * planned already. Once MAX_FILES_PER_CALL files are planned, every further candidate is
+ * too_many_files without being looked at (no stat, realpath or open; a named path is still told
+ * apart as a file or a folder, and a folder still listed), so a folder of thousands of files costs
+ * one listing. A named path that yields no entry is in `emptyPaths`.
  */
 export async function resolveUploadPlan(paths: string[]): Promise<UploadPlan> {
-  const entries: PlanEntry[] = [];
-  const emptyPaths: string[] = [];
-  const planned = new Set<string>(); // real paths that passed every other check, capped ones included
+  const plan = new PlanBuilder();
   for (const path of paths) {
-    const resolved = await resolvePath(path);
-    if (resolved.length === 0) emptyPaths.push(path);
-    for (const entry of resolved) {
-      if (entry.decision === "skip") {
-        entries.push(entry);
-      } else if (planned.has(entry.realPath)) {
-        entries.push({ ...entry, decision: "skip", reason: "duplicate_path" });
-      } else {
-        planned.add(entry.realPath);
-        const capped = planned.size > MAX_FILES_PER_CALL;
-        entries.push(capped ? { ...entry, decision: "skip", reason: "too_many_files" } : entry);
-      }
-    }
+    const before = plan.entries.length;
+    await resolvePath(path, plan);
+    if (plan.entries.length === before) plan.emptyPaths.push(path);
   }
-  return { entries, digest: planDigest(entries), emptyPaths };
+  return { entries: plan.entries, digest: planDigest(plan.entries), emptyPaths: plan.emptyPaths };
+}
+
+/** The plan as it is built: the entries in order, and the real paths of the files it uploads. */
+class PlanBuilder {
+  readonly entries: PlanEntry[] = [];
+  readonly emptyPaths: string[] = [];
+  readonly #uploads = new Set<string>();
+
+  /** Whether MAX_FILES_PER_CALL files are planned: a candidate from now on is capped unseen. */
+  get full(): boolean {
+    return this.#uploads.size >= MAX_FILES_PER_CALL;
+  }
+
+  /** Adds `entry`; an upload of a real path the plan uploads already is a duplicate_path skip instead. */
+  add(entry: PlanEntry): void {
+    if (entry.decision === "upload") {
+      if (this.#uploads.has(entry.realPath)) {
+        this.entries.push({ ...entry, decision: "skip", reason: "duplicate_path" });
+        return;
+      }
+      this.#uploads.add(entry.realPath);
+    }
+    this.entries.push(entry);
+  }
 }
 
 /** sha256 over the sorted "realPath\0sizeBytes" of the upload entries, first 16 hex characters. */
@@ -110,41 +125,48 @@ class FsFailure {
 const failure = (err: unknown) => new FsFailure(err);
 
 /** One path as given: the entries of its candidate files, or one entry saying why it has none. */
-async function resolvePath(path: string): Promise<PlanEntry[]> {
-  if (!isAbsolute(path)) return [unresolved(path, "not_absolute")];
+async function resolvePath(path: string, plan: PlanBuilder): Promise<void> {
+  if (!isAbsolute(path)) return plan.add(unresolved(path, "not_absolute"));
   const stats = await stat(path).catch(failure);
-  if (stats instanceof FsFailure) return [unresolved(path, stats.reason)];
-  if (!stats.isFile() && !stats.isDirectory()) return [unresolved(path, "not_a_file")];
-  // A named file is contained by the directory it sits in; a named directory's files by that directory.
-  const inside = await realpath(stats.isFile() ? dirname(path) : path).then(withTrailingSep, failure);
-  if (inside instanceof FsFailure) return [unresolved(path, inside.reason)];
-  if (stats.isFile()) return [await resolveCandidate(path, stats.size, inside)];
-  return resolveDirectory(path, inside);
+  if (stats instanceof FsFailure) return plan.add(unresolved(path, stats.reason));
+  if (stats.isDirectory()) return resolveDirectory(path, plan);
+  if (!stats.isFile()) return plan.add(unresolved(path, "not_a_file"));
+  if (plan.full) return plan.add(unresolved(path, "too_many_files"));
+  // A named file is contained by the directory it sits in.
+  const inside = await realpath(dirname(path)).then(withTrailingSep, failure);
+  if (inside instanceof FsFailure) return plan.add(unresolved(path, inside.reason));
+  plan.add(await resolveCandidate(path, stats.size, inside));
 }
 
 /** A named directory's direct children that are files or symlinks to files, sorted by name so the plan
  *  (and which files the cap leaves out) does not follow the filesystem's listing order. Dotfiles,
- *  subdirectories and symlinks that lead to a directory or nowhere are omitted without an entry. */
-async function resolveDirectory(directory: string, inside: string): Promise<PlanEntry[]> {
+ *  subdirectories and symlinks that lead to a directory or nowhere are omitted without an entry; past
+ *  the cap every file or symlink the listing names is capped unseen. */
+async function resolveDirectory(directory: string, plan: PlanBuilder): Promise<void> {
+  // The real path its files must stay inside; not read when no file of it will be looked at.
+  const inside = plan.full ? null : await realpath(directory).then(withTrailingSep, failure);
+  if (inside instanceof FsFailure) return plan.add(unresolved(directory, inside.reason));
   const children = await readdir(directory, { withFileTypes: true }).catch(failure);
-  if (children instanceof FsFailure) return [unresolved(directory, children.reason)];
+  if (children instanceof FsFailure) return plan.add(unresolved(directory, children.reason));
   const names = children
     .filter((child) => (child.isFile() || child.isSymbolicLink()) && !child.name.startsWith("."))
     .map((child) => child.name)
     .sort();
-  const entries: PlanEntry[] = [];
   for (const name of names) {
     // Concatenated, not path.join: join would collapse a ".." the caller wrote as text, while the OS
     // resolves it after the symlinks before it.
     const path = withTrailingSep(directory) + name;
+    if (inside === null || plan.full) {
+      plan.add(unresolved(path, "too_many_files"));
+      continue;
+    }
     const stats = await stat(path).catch(failure);
     if (stats instanceof FsFailure) {
-      if (stats.reason === "unreadable") entries.push(unresolved(path, "unreadable"));
+      if (stats.reason === "unreadable") plan.add(unresolved(path, "unreadable"));
     } else if (stats.isFile()) {
-      entries.push(await resolveCandidate(path, stats.size, inside));
+      plan.add(await resolveCandidate(path, stats.size, inside));
     }
   }
-  return entries;
 }
 
 /** One candidate file; the first check it fails decides its reason. `inside` is the real path of the
@@ -206,7 +228,7 @@ function withTrailingSep(directory: string): string {
   return directory.endsWith(sep) ? directory : directory + sep;
 }
 
-/** The entry of a path that led to no file. */
+/** The entry of a path that led to no file, or that the cap left unseen. */
 function unresolved(path: string, reason: SkipReason): PlanEntry {
   return { path, realPath: "", name: basename(path), sizeBytes: 0, kind: null, decision: "skip", reason };
 }

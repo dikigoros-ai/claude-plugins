@@ -1,17 +1,23 @@
 // The two tools of the dikigoros-upload server. upload_to_matter lists the files a call names and
-// uploads them into a matter only when a second call confirms the listing; create_matter opens a
-// matter. Both make sure of the sign-in first: with nobody signed in, the result is the prompt of a
-// new device-flow sign-in. A refusal of the API is answered with its sentence (../api/errors), and
-// no answer at all with a sentence saying what was not done. No result carries a token, the device
-// code, an error's metadata or a file's bytes.
+// uploads them into a matter only when a second call confirms the listing with its digest;
+// create_matter opens a matter. Both make sure of the sign-in first: with nobody signed in, the
+// result is the prompt of a new device-flow sign-in. A refusal of the API is answered with its
+// sentence (../api/errors), and no answer at all with a sentence saying what was not done. No result
+// carries a token, the device code, an error's metadata or a file's bytes.
 
 import type { CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import type { DikigorosApi, Matter } from "../api/client";
+import type { CurrentUser, DikigorosApi, Matter } from "../api/client";
 import { ApiError, describeApiError } from "../api/errors";
 import type { AuthSession, SignInPrompt } from "../auth/session";
 import type { HelperConfig } from "../config";
-import { MAX_PATHS_PER_CALL, type PlanEntry, type resolveUploadPlan, type UploadPlan } from "../files/resolve";
+import {
+  MAX_PATHS_PER_CALL,
+  type PlanEntry,
+  type resolveUploadPlan,
+  type SkipReason,
+  type UploadPlan,
+} from "../files/resolve";
 import type { DocumentOutcome, UploadContext } from "../pipeline/upload-document";
 
 // Ported from dikigoros-ai/dikigoros-ai lib/matters.ts @ 37f39ac5 (2026-10-19): the matter types,
@@ -78,6 +84,17 @@ const ANNOTATIONS = { readOnlyHint: false, destructiveHint: false, idempotentHin
 
 const NOT_CONFIGURED = "The helper is not configured (DIKIGOROS_AUTH0_CLIENT_ID is empty).";
 
+/** How many of the files it skips a listing names; the others are counted by reason. */
+const SHOWN_SKIPS = 25;
+
+/** The matter a call is about, and how many documents it holds of the plan's limit (-1: none). */
+interface Holding {
+  matterId: number;
+  title: string;
+  held: number;
+  limit: number;
+}
+
 /** Registers upload_to_matter and create_matter on `server`, both answering with `deps`. */
 export function registerTools(server: McpServer, deps: ToolDeps): void {
   server.registerTool(
@@ -87,8 +104,8 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       description:
         "Use this when the lawyer asks to add files from this computer to a DIKIGOROS matter. Takes absolute paths " +
         "to .pdf, .docx, .txt or .md files, or to a folder (its top-level files). The first call lists what would be " +
-        "uploaded and uploads nothing; call again with confirm: true to upload. Not for files already in the matter, " +
-        "other file types, or for searching or reading matter documents.",
+        "uploaded and uploads nothing; call again with confirm: true and the plan_digest from that answer to upload. " +
+        "Not for files already in the matter, other file types, or for searching or reading matter documents.",
       inputSchema: uploadToMatterInput,
       annotations: ANNOTATIONS,
     },
@@ -110,22 +127,46 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
 }
 
 /**
- * upload_to_matter. Without `confirm: true` it lists the plan for `paths` and uploads nothing. With
- * it, unless a plan_digest no longer matches the files, it checks the account and the matter's
- * document limit, then uploads the planned files one after another and reports each.
+ * upload_to_matter. Every call checks the account and the matter first, so that a matter that is not
+ * there is said before any list. Unless the call carries `confirm: true` and the plan_digest of a
+ * listing, it lists the plan for `paths` and uploads nothing; a plan_digest the files no longer match
+ * lists them again. A confirmed call checks the matter's document limit, then uploads the planned
+ * files one after another and reports each.
  */
 export async function handleUploadToMatter(args: UploadToMatterArgs, deps: ToolDeps): Promise<CallToolResult> {
   const blocked = await signInGate(deps);
   if (blocked !== null) return blocked;
+  const { config, session, api } = deps;
   try {
+    // A 401 from this allowlisted route, after the client's retry with a refreshed token: the session is dead.
+    const me = await api.currentUser().catch(nullOn401);
+    if (me === null) return restartSignIn(session);
+    if (!me.entitlements.mattersAccess) {
+      return failure(describeApiError(new ApiError(403, "entitlement_required"), config.baseUrl));
+    }
+    const { matter, documents } = await api.getMatter(args.matter_id);
+    const holding: Holding = {
+      matterId: args.matter_id,
+      title: matter.title,
+      held: documents.length,
+      limit: me.entitlements.docsPerMatter,
+    };
     const plan = await deps.resolvePlan(args.paths);
-    if (args.confirm !== true) return listing("confirmation_required", plan);
-    if (args.plan_digest !== undefined && args.plan_digest !== plan.digest) return listing("plan_changed", plan);
+    // confirm: true alone confirms nothing: only the digest says which listing the lawyer approved.
+    if (args.confirm !== true || args.plan_digest === undefined) return listing("confirmation_required", plan, holding);
+    if (args.plan_digest !== plan.digest) return listing("plan_changed", plan, holding);
     const uploads = plan.entries.filter((entry) => entry.decision === "upload");
     if (uploads.length === 0) return answer("Nothing to upload.");
-    return await uploadPlanned(args, uploads, deps);
+    const { held, limit } = holding;
+    if (limit !== -1 && held + uploads.length > limit) {
+      return failure(
+        `Matter #${args.matter_id} holds ${held} of ${limit} documents; ` +
+          `${uploads.length} more would exceed the limit. Nothing was uploaded.`,
+      );
+    }
+    return await uploadPlanned(args, uploads, me, deps);
   } catch (err) {
-    return failureAfterSignIn(err, deps.config.baseUrl, "Nothing was uploaded; try again in a moment.");
+    return failureAfterSignIn(err, config.baseUrl, "Nothing was uploaded; try again in a moment.");
   }
 }
 
@@ -165,25 +206,16 @@ export async function handleCreateMatter(args: CreateMatterArgs, deps: ToolDeps)
 }
 
 /**
- * What a confirmed call does with the files its plan uploads: the account, the matter's document
- * limit, the native runtime when a PDF is among them, then the uploads one at a time.
+ * What a confirmed call does with the files its plan uploads: the native runtime when a PDF is
+ * among them, then the uploads one at a time.
  */
-async function uploadPlanned(args: UploadToMatterArgs, uploads: PlanEntry[], deps: ToolDeps): Promise<CallToolResult> {
-  const { config, session, api } = deps;
-  // A 401 from this allowlisted route, after the client's retry with a refreshed token: the session is dead.
-  const me = await api.currentUser().catch(nullOn401);
-  if (me === null) return restartSignIn(session);
-  if (!me.entitlements.mattersAccess) {
-    return failure(describeApiError(new ApiError(403, "entitlement_required"), config.baseUrl));
-  }
-  const { documents } = await api.getMatter(args.matter_id);
-  const limit = me.entitlements.docsPerMatter;
-  if (limit !== -1 && documents.length + uploads.length > limit) {
-    return failure(
-      `Matter #${args.matter_id} holds ${documents.length} of ${limit} documents; ` +
-        `${uploads.length} more would exceed the limit. Nothing was uploaded.`,
-    );
-  }
+async function uploadPlanned(
+  args: UploadToMatterArgs,
+  uploads: PlanEntry[],
+  me: CurrentUser,
+  deps: ToolDeps,
+): Promise<CallToolResult> {
+  const { config } = deps;
   // Without the native runtime no PDF can be read; the other files do not need it.
   const runtimeFailure = uploads.some((entry) => entry.kind === "pdf")
     ? await deps.nativeRuntime().then(() => null, firstLine)
@@ -229,25 +261,49 @@ async function report(matterId: number, outcomes: DocumentOutcome[], deps: ToolD
   return answer(lines.join("\n"), { status: "done", matter_id: matterId, matter_url: matterUrl, results });
 }
 
-/** The plan, a line per file and per named path without one, and how to confirm it. */
-function listing(status: "confirmation_required" | "plan_changed", plan: UploadPlan): CallToolResult {
-  const marked = plan.entries.filter((entry) => entry.decision === "upload").length;
+/**
+ * The plan: how to confirm it first, so that it is read before a long list; then a line per file it
+ * uploads, a line for each of the first SHOWN_SKIPS files it skips and a count by reason of the
+ * others, a line per named path without a file, and the matter with its documents.
+ */
+function listing(status: "confirmation_required" | "plan_changed", plan: UploadPlan, holding: Holding): CallToolResult {
+  const uploads = plan.entries.filter((entry) => entry.decision === "upload");
+  const skips = plan.entries.filter((entry): entry is Skipped => entry.decision === "skip" && entry.reason !== undefined);
+  const shown = skips.slice(0, SHOWN_SKIPS);
+  const { matterId, title, held, limit } = holding;
   const lines = [
     ...(status === "plan_changed" ? ["The files have changed since they were listed."] : []),
-    ...plan.entries.map(row),
-    ...plan.emptyPaths.map((path) => `${path}: no eligible files`),
     `Nothing has been uploaded. Call again with confirm: true and plan_digest "${plan.digest}" ` +
-      `to upload the ${marked} file(s) marked upload.`,
+      `to upload the ${uploads.length} file(s) marked upload.`,
+    ...uploads.map(row),
+    ...shown.map(row),
+    ...[...countByReason(skips.slice(SHOWN_SKIPS))].map(
+      ([reason, count]) => `… and ${count.toLocaleString("en-US")} more skipped (${reason})`,
+    ),
+    ...plan.emptyPaths.map((path) => `${path}: no eligible files`),
+    `Matter #${matterId} "${title}": ${held} of ${limit === -1 ? "∞" : limit} documents`,
   ];
-  const files = plan.entries.map((entry) => ({
-    name: entry.name,
-    path: entry.path,
-    size_bytes: entry.sizeBytes,
-    type: entry.kind,
-    decision: entry.decision,
-    reason: entry.reason,
-  }));
-  return answer(lines.join("\n"), { status, plan_digest: plan.digest, files, empty_paths: plan.emptyPaths });
+  return answer(lines.join("\n"), {
+    status,
+    plan_digest: plan.digest,
+    files: uploads.map(({ name, sizeBytes, kind }) => ({ name, size_bytes: sizeBytes, type: kind })),
+    skipped: {
+      shown: shown.map(({ name, reason }) => ({ name, reason })),
+      counts: Object.fromEntries(countByReason(skips)),
+    },
+    empty_paths: plan.emptyPaths,
+    matter: { id: matterId, title, document_count: held, document_limit: limit === -1 ? null : limit },
+  });
+}
+
+/** A plan entry that is skipped, with its reason. */
+type Skipped = PlanEntry & { reason: SkipReason };
+
+/** How many of `skips` each reason has, the reasons in the order they first come. */
+function countByReason(skips: Skipped[]): Map<SkipReason, number> {
+  const counts = new Map<SkipReason, number>();
+  for (const { reason } of skips) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  return counts;
 }
 
 /** name · size · type · decision; "—" for a size or a type the entry does not have. */

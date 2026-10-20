@@ -12,7 +12,8 @@ is not configured". It also waits for the main app's PR 4, which adds `POST /api
 - The `dikigoros-ai` marketplace and its `dikigoros` plugin: the remote DIKIGOROS connector
   (`https://dikigoros.ai/mcp`) and the local stdio server `dikigoros-upload`.
 - `upload_to_matter`: lists the `.pdf`, `.docx`, `.txt` and `.md` files that the given paths name, and uploads them
-  into a matter only on a second call with `confirm: true`; optionally with a role and a side.
+  into a matter only on a second call with `confirm: true` and the listing's `plan_digest`; optionally with a role
+  and a side.
 - `create_matter`: creates a matter with a title and an optional type, case reference and description.
 - Sign-in with the Auth0 device authorization grant; the refresh token is kept in the OS keychain.
 - The web uploader's pipeline, in Node.js: the SHA-256, the file into the private blob store, the text extraction

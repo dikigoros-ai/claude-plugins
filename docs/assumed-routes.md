@@ -118,10 +118,11 @@ random suffix added to the stored name.
 ### The store's PUT
 
 `PUT <store API>/?pathname=<the pathname, URL-encoded>`, where the store API is the SDK's default
-(`https://vercel.com/api/blob`) unless `VERCEL_BLOB_API_URL` (or `NEXT_PUBLIC_VERCEL_BLOB_API_URL`) names another, as
-the tests do. Headers: `authorization: Bearer <client token>`, `x-api-version`, `x-content-type: <the type>`,
-`x-vercel-blob-access: private`. The body is the bytes, sent from this computer to the store, never through
-dikigoros.ai.
+(`https://vercel.com/api/blob`). `VERCEL_BLOB_API_URL` (or `NEXT_PUBLIC_VERCEL_BLOB_API_URL`) would name another: the
+helper removes both from its environment when it starts, with the two `…PROXY_THROUGH_ALTERNATIVE_API` variables, and
+only the tests, which run the pipeline without the server, point the SDK at their fake store. Headers:
+`authorization: Bearer <client token>`, `x-api-version`, `x-content-type: <the type>`, `x-vercel-blob-access: private`.
+The body is the bytes, sent from this computer to the store, never through dikigoros.ai.
 
 The answer carries the blob's `url` on the store's private host (`https://<store id>.private.blob.vercel-storage.com/…`,
 the pathname with the store's suffix), with `pathname`, `contentType` and `contentDisposition`. The helper registers

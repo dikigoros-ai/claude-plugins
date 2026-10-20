@@ -70,6 +70,10 @@ describe("the marketplace and the plugin manifest", () => {
     expect(existsSync(file) && statSync(file).isFile(), file).toBe(true);
   });
 
+  it("start it without an env: a manifest value would override the shell's and the per-origin defaults", () => {
+    expect(manifest().mcpServers["dikigoros-upload"]).not.toHaveProperty("env");
+  });
+
   it("ask for no settings at install (no userConfig)", () => {
     expect(manifest()).not.toHaveProperty("userConfig");
     expect(entry()).not.toHaveProperty("userConfig");

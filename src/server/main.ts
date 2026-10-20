@@ -3,7 +3,8 @@
 // native packages, canvas for scanned pages and keyring for the OS keychain, are installed on first
 // use into the plugin's data directory, unless DIKIGOROS_HELPER_NATIVE_DIR names a node_modules that
 // holds them. `node dikigoros-upload.mjs --extract-check <file>` starts no server: it extracts the
-// PDF and prints its counts, a check that pdf.js and the canvas work from the bundle's directory.
+// PDF and prints its counts, a check that pdf.js and the canvas work from the bundle's directory. A
+// Node.js older than 22.13 gets one stderr line and exit 1 before anything else.
 
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -26,13 +27,31 @@ import { platformKey } from "../native/platform";
 import { uploadDocument, type UploadDeps } from "../pipeline/upload-document";
 import { resolveAssets } from "./assets";
 import { once } from "./lazy";
+import { isSupportedNode } from "./node-version";
 import { registerTools, type ToolDeps } from "./tools";
 
 /** The plugin's version, defined by the build (scripts/build.ts); not defined when run from source. */
 declare const PLUGIN_VERSION: string | undefined;
 
+/**
+ * The blob SDK's settings of where it sends an upload. The helper's store is the SDK's default; an
+ * inherited value would send the files' bytes and their client tokens somewhere else.
+ */
+const BLOB_DESTINATION_VARIABLES = [
+  "VERCEL_BLOB_API_URL",
+  "NEXT_PUBLIC_VERCEL_BLOB_API_URL",
+  "VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API",
+  "NEXT_PUBLIC_VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API",
+];
+
+if (!isSupportedNode(process.versions.node)) {
+  console.error(`dikigoros-upload needs Node.js 22.13 or later; found ${process.versions.node}`);
+  process.exit(1);
+}
 // stdout is the JSON-RPC channel: whatever a library prints goes to stderr instead.
 console.log = console.info = console.warn = console.debug = console.dir = console.error;
+// The SDK reads them at each upload, so they are gone before the first.
+for (const name of BLOB_DESTINATION_VARIABLES) delete process.env[name];
 // The blob SDK retries a failed upload 10 times by default, doubling its wait: half an hour of silence.
 process.env.VERCEL_BLOB_RETRIES ||= "2";
 

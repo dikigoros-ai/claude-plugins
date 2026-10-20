@@ -4,10 +4,10 @@
 
 Initial release.
 
-**Not yet live.** It waits for the DIKIGOROS Auth0 application: until its client id is set as
-`DIKIGOROS_AUTH0_CLIENT_ID` in `plugins/dikigoros/.claude-plugin/plugin.json`, every tool call answers "The helper
-is not configured". It also waits for the main app's PR 4, which adds `POST /api/matters/[id]/documents/text` and
-`PATCH /api/matters/[id]/documents/[docId]` to its connector-token allowlist ([docs/assumed-routes.md](docs/assumed-routes.md)).
+**Not yet live.** It waits for the DIKIGOROS Auth0 application: until its client id is set in `src/config.ts`, every
+tool call answers "The helper is not configured". It also waits for the main app's PR 4, which adds
+`POST /api/matters/[id]/documents/text` and `PATCH /api/matters/[id]/documents/[docId]` to its connector-token
+allowlist ([docs/assumed-routes.md](docs/assumed-routes.md)).
 
 - The `dikigoros-ai` marketplace and its `dikigoros` plugin: the remote DIKIGOROS connector
   (`https://dikigoros.ai/mcp`) and the local stdio server `dikigoros-upload`.

@@ -1,6 +1,7 @@
 // The helper's settings, from the environment its host gives the server process (the plugin
-// manifest's `env`, or a developer's shell). The two origins the helper may talk to are spelled
-// here and nowhere else; any other DIKIGOROS_BASE_URL is refused before anything starts.
+// manifest adds nothing to it: a manifest value would override the shell's), over the defaults of
+// each origin here. The two origins the helper may talk to are spelled here and nowhere else; any
+// other DIKIGOROS_BASE_URL is refused before anything starts.
 
 import { join } from "node:path";
 
@@ -39,6 +40,16 @@ const DEFAULT_AUTH0_DOMAIN: Record<AllowedOrigin, string> = {
 };
 
 /**
+ * The Auth0 application each origin signs in with, unless DIKIGOROS_AUTH0_CLIENT_ID names another.
+ * Empty until the application exists; the production one is set here at release time (a native
+ * application's client id is public).
+ */
+export const DEFAULT_AUTH0_CLIENT_ID: Record<AllowedOrigin, string> = {
+  [PRODUCTION_ORIGIN]: "",
+  [LOCAL_ORIGIN]: "",
+};
+
+/**
  * The configuration `env` describes. Pure: it reads its two arguments and nothing else (not
  * process.env, not os.homedir()). A variable set to "" counts as unset. Throws ConfigError when
  * DIKIGOROS_BASE_URL, less one trailing slash, is not byte for byte one of ALLOWED_ORIGINS.
@@ -49,7 +60,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, homeDir: string): HelperConfi
     baseUrl,
     audience: `${baseUrl}/mcp`,
     auth0Domain: setting(env.DIKIGOROS_AUTH0_DOMAIN) ?? DEFAULT_AUTH0_DOMAIN[baseUrl],
-    auth0ClientId: setting(env.DIKIGOROS_AUTH0_CLIENT_ID) ?? "",
+    auth0ClientId: setting(env.DIKIGOROS_AUTH0_CLIENT_ID) ?? DEFAULT_AUTH0_CLIENT_ID[baseUrl],
     scopes: DEVICE_SCOPES,
     dataDir: setting(env.CLAUDE_PLUGIN_DATA) ?? join(homeDir, ".dikigoros", "helper"),
     openBrowser: env.DIKIGOROS_NO_BROWSER !== "1",

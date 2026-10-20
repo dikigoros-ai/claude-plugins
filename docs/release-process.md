@@ -19,6 +19,10 @@ Set the new version, the same in three places:
 
 Add the version's entry to `CHANGELOG.md`.
 
+The production Auth0 application's client id lives in `src/config.ts` (`DEFAULT_AUTH0_CLIENT_ID`), not in the plugin
+manifest: a manifest `env` would override the environment Claude starts the helper with. The first release lawyers
+install sets it there; the build carries it into the bundle.
+
 ## 2. The native packages, only when their version changes
 
 `@napi-rs/canvas` and `@napi-rs/keyring` are not bundled: the helper installs them on first use, from the tarballs

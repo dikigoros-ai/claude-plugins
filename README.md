@@ -9,9 +9,9 @@ The `dikigoros` plugin connects Claude to [DIKIGOROS AI](https://dikigoros.ai). 
   DIKIGOROS matter, through the same routes and steps as the uploader on dikigoros.ai. The remote connector cannot do
   this: MCP has no channel for files.
 
-> **0.1.0 is not live yet.** Until the DIKIGOROS Auth0 application exists and its client id is set as
-> `DIKIGOROS_AUTH0_CLIENT_ID` in `plugins/dikigoros/.claude-plugin/plugin.json`, the helper answers every tool call
-> with "The helper is not configured (DIKIGOROS_AUTH0_CLIENT_ID is empty)." That is expected in this release.
+> **0.1.0 is not live yet.** Until the DIKIGOROS Auth0 application exists and its client id is set in
+> `src/config.ts`, the helper answers every tool call with "The helper is not configured (DIKIGOROS_AUTH0_CLIENT_ID is
+> empty)." That is expected in this release.
 > Uploads of `.txt` and `.md` files, and roles and sides, also wait for dikigoros.ai to accept the helper's sign-in
 > on two more routes ([docs/assumed-routes.md](docs/assumed-routes.md)).
 
@@ -32,8 +32,9 @@ claude plugin install dikigoros@dikigoros-ai
 ```
 
 The local helper needs **Node.js 22.13 or later** on the `PATH` that Claude Code or Cowork starts it with: the
-plugin runs it as `node ${CLAUDE_PLUGIN_ROOT}/server/dikigoros-upload.mjs`. Claude Code always runs it; Cowork runs
-it when the session runs on your computer; Claude on the web lists the remote connector and ignores the local
+plugin runs it as `node ${CLAUDE_PLUGIN_ROOT}/server/dikigoros-upload.mjs`, and an older Node.js gets one line,
+"dikigoros-upload needs Node.js 22.13 or later; found <version>", and nothing else. Claude Code always runs it; Cowork
+runs it when the session runs on your computer; Claude on the web lists the remote connector and ignores the local
 helper.
 
 The helper works with a DIKIGOROS account whose plan includes Matters.
@@ -183,18 +184,23 @@ account and the matter only. Nothing else leaves this computer: the helper sends
 
 ## Configuration
 
-The helper reads these from the environment its host starts it with: the plugin manifest's `env`, or your shell when
-you run it yourself. A variable set to an empty value counts as unset.
+The helper reads these from the environment Claude starts it with, to which the plugin manifest adds nothing, or from
+your shell when you run it yourself. A variable set to an empty value counts as unset. The defaults are in
+`src/config.ts`: the production client id is set there at release time, and the environment overrides it.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `DIKIGOROS_BASE_URL` | `https://dikigoros.ai` | The DIKIGOROS address. Only `https://dikigoros.ai` and `http://localhost:3000` (development) are accepted, a trailing slash aside; with any other value the helper prints one line and exits. |
-| `DIKIGOROS_AUTH0_DOMAIN` | `dikigoros-prod.eu.auth0.com` (set in the plugin manifest) | The Auth0 tenant the helper signs in with. For `http://localhost:3000` the default is the development tenant (`src/config.ts`). |
-| `DIKIGOROS_AUTH0_CLIENT_ID` | empty (set in the plugin manifest) | The Auth0 application's client id. While it is empty, every tool call answers "The helper is not configured". |
+| `DIKIGOROS_AUTH0_DOMAIN` | `dikigoros-prod.eu.auth0.com`; for `http://localhost:3000`, the staging tenant `dikigoros-staging.eu.auth0.com` | The Auth0 tenant the helper signs in with. |
+| `DIKIGOROS_AUTH0_CLIENT_ID` | the production application's, set in `src/config.ts` at release time (empty in 0.1.0); empty for `http://localhost:3000` | The Auth0 application's client id. While it is empty, every tool call answers "The helper is not configured". |
 | `CLAUDE_PLUGIN_DATA` | `~/.dikigoros/helper` when unset | The plugin's data directory: where the helper installs the native components. |
 | `DIKIGOROS_NO_BROWSER` | unset | `1`: do not open the sign-in link in the browser; the result still carries it. |
 | `DIKIGOROS_HELPER_NATIVE_DIR` | unset | A `node_modules` directory that already holds `@napi-rs/canvas` and `@napi-rs/keyring` with their platform packages, used instead of downloading them. |
 | `VERCEL_BLOB_RETRIES` | `2`, set by the helper when unset | How often the blob store client retries a failed upload. |
+
+The helper removes `VERCEL_BLOB_API_URL`, `NEXT_PUBLIC_VERCEL_BLOB_API_URL`, `VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API`
+and `NEXT_PUBLIC_VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API` from its environment when it starts: set in the shell for
+another project, they would send the files and their upload tokens somewhere other than the DIKIGOROS store.
 
 ## Limits
 
@@ -220,6 +226,9 @@ you run it yourself. A variable set to an empty value counts as unset.
 with. Install Node.js 22 LTS (22.13 or later) for the whole system, with the installer from nodejs.org for instance,
 and restart the app. A Node.js installed for your terminal only, through a version manager for instance, is not on
 the `PATH` of an app started from the Dock, the Start menu or the desktop.
+
+**`dikigoros-upload needs Node.js 22.13 or later; found <version>`.** The `node` on the `PATH` the app starts the
+helper with is older than 22.13. Install Node.js 22 LTS (22.13 or later), as above, and restart the app.
 
 **`Unsupported platform: <platform>-<arch>`.** The native components exist for the six platforms listed under
 [First use](#first-use) only. Elsewhere PDFs fail and the sign-in is kept in memory only; DOCX, TXT and MD files

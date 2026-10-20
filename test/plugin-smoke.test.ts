@@ -162,6 +162,31 @@ describe("the bundled dikigoros-upload server", () => {
     }
   });
 
+  it("starts and lists its tools with the blob store's address variables inherited, which it drops", async () => {
+    const elsewhere = "http://127.0.0.1:9/elsewhere";
+    const run = await runBundle(
+      BUNDLE,
+      [],
+      {
+        DIKIGOROS_BASE_URL: "http://localhost:3000",
+        DIKIGOROS_AUTH0_CLIENT_ID: "test",
+        CLAUDE_PLUGIN_DATA: dataDir,
+        VERCEL_BLOB_API_URL: elsewhere,
+        NEXT_PUBLIC_VERCEL_BLOB_API_URL: elsewhere,
+        VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API: elsewhere,
+        NEXT_PUBLIC_VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API: elsewhere,
+      },
+      { messages: LIST_TOOLS, until: 2 },
+    );
+    expect(run.code, run.stderr).toBe(0);
+    const tools = run.stdout
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as JsonRpcLine)
+      .find((message) => message.id === 2)?.result?.tools;
+    expect(tools?.map((tool) => tool.name).sort()).toEqual(["create_matter", "upload_to_matter"]);
+  });
+
   it("refuses a DIKIGOROS_BASE_URL other than the allowed origins with one stderr line and exit 1", async () => {
     const run = await runBundle(BUNDLE, [], {
       DIKIGOROS_BASE_URL: "https://example.com",

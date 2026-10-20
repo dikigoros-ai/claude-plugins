@@ -12,8 +12,7 @@
     "dikigoros": { "type": "http", "url": "https://dikigoros.ai/mcp" },
     "dikigoros-upload": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/server/dikigoros-upload.mjs"],
-      "env": { "DIKIGOROS_AUTH0_DOMAIN": "dikigoros-prod.eu.auth0.com", "DIKIGOROS_AUTH0_CLIENT_ID": "" }
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/dikigoros-upload.mjs"]
     }
   }
 }

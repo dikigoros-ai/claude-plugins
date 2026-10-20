@@ -1,0 +1,19 @@
+{
+  "name": "dikigoros",
+  "displayName": "DIKIGOROS AI",
+  "version": "0.1.0",
+  "description": "Cyprus case law, legislation and matters from DIKIGOROS AI, plus a local helper that uploads files from this computer into a matter.",
+  "author": { "name": "DIKIGOROS AI", "url": "https://dikigoros.ai" },
+  "homepage": "https://dikigoros.ai/connect",
+  "repository": "https://github.com/dikigoros-ai/claude-plugins",
+  "license": "MIT",
+  "keywords": ["cyprus", "law", "legal-research", "matters"],
+  "mcpServers": {
+    "dikigoros": { "type": "http", "url": "https://dikigoros.ai/mcp" },
+    "dikigoros-upload": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/dikigoros-upload.mjs"],
+      "env": { "DIKIGOROS_AUTH0_DOMAIN": "dikigoros-prod.eu.auth0.com", "DIKIGOROS_AUTH0_CLIENT_ID": "" }
+    }
+  }
+}

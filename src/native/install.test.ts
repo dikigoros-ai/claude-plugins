@@ -14,8 +14,9 @@ import { join } from "node:path";
 import * as tar from "tar";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { FetchLike } from "../auth/device-flow";
-import { ensureNativeRuntime, lockHash, type NativeLock } from "./install";
+import { ensureNativeRuntime, lockHash, type NativeLock, readNativeLock } from "./install";
 import { loadCanvasModule, loadKeyringBinding } from "./load";
+import committedLock from "./lock.generated.json" with { type: "json" };
 
 const CANVAS_PLATFORM = "@napi-rs/canvas-linux-x64-gnu";
 const KEYRING_PLATFORM = "@napi-rs/keyring-linux-x64-gnu";
@@ -56,14 +57,26 @@ const FAKES: FakePackage[] = [
   },
 ];
 
-/** A package tarball as npm publishes one: gzipped, every file under `package/`. */
-async function pack(name: string, version: string, index: string): Promise<Buffer> {
+/**
+ * A package tarball as npm publishes one: gzipped, every file under `package/`. `extra` adds files
+ * by their path in the archive; each is written to disk under a short name and renamed as it is
+ * packed, so that the archive can hold a name no file system takes.
+ */
+async function pack(name: string, version: string, index: string, extra: Record<string, string> = {}): Promise<Buffer> {
   const cwd = await mkdtemp(join(tmpdir(), "dikigoros-native-pack-"));
   try {
     await mkdir(join(cwd, "package"));
     await writeFile(join(cwd, "package", "package.json"), JSON.stringify({ name, version, main: "index.js" }));
     await writeFile(join(cwd, "package", "index.js"), index);
-    return await tar.c({ gzip: true, cwd, portable: true }, ["package"]).concat();
+    const renames = new Map<string, string>();
+    for (const [i, [archivePath, content]] of Object.entries(extra).entries()) {
+      await writeFile(join(cwd, "package", `extra-${i}`), content);
+      renames.set(`package/extra-${i}`, archivePath);
+    }
+    const onWriteEntry = (entry: { path: string }) => {
+      entry.path = renames.get(entry.path) ?? entry.path;
+    };
+    return await tar.c({ gzip: true, cwd, portable: true, onWriteEntry }, ["package"]).concat();
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -82,6 +95,8 @@ const genuine = new Map<string, Buffer>();
 let served = new Map<string, Buffer>();
 /** Paths whose answer stops after its first bytes, the connection dropped. */
 const cutOff = new Set<string>();
+/** Paths whose answer stops after its first bytes, the connection held open. */
+const stalled = new Set<string>();
 
 const registry = createServer((req, res) => {
   const path = req.url ?? "/";
@@ -91,6 +106,9 @@ const registry = createServer((req, res) => {
   } else if (cutOff.has(path)) {
     res.writeHead(200, { "Content-Length": String(body.length) });
     res.write(body.subarray(0, 16), () => res.destroy());
+  } else if (stalled.has(path)) {
+    res.writeHead(200, { "Content-Length": String(body.length) });
+    res.write(body.subarray(0, 16));
   } else {
     res.writeHead(200, { "Content-Length": String(body.length) }).end(body);
   }
@@ -134,6 +152,7 @@ let dataDir = "";
 beforeEach(async () => {
   served = new Map(genuine);
   cutOff.clear();
+  stalled.clear();
   dataDir = await mkdtemp(join(tmpdir(), "dikigoros-native-"));
 });
 
@@ -155,14 +174,21 @@ function options(overrides: Partial<InstallOptions> = {}): InstallOptions {
   return { dataDir, lock, platform: "linux-x64-gnu", fetchImpl: fetch, log: () => {}, ...overrides };
 }
 
-/** fetch, recording the URL of every request. */
-function recordingFetch(): { fetchImpl: FetchLike; urls: string[] } {
+/** The test lock with one package's pin changed. */
+function withPin(name: string, change: Partial<NativeLock["packages"][string]>): NativeLock {
+  return { ...lock, packages: { ...lock.packages, [name]: { ...lock.packages[name], ...change } } };
+}
+
+/** fetch, recording the URL and the abort signal of every request. */
+function recordingFetch(): { fetchImpl: FetchLike; urls: string[]; signals: unknown[] } {
   const urls: string[] = [];
+  const signals: unknown[] = [];
   const fetchImpl: FetchLike = async (input: string | URL | Request, init?: RequestInit) => {
     urls.push(String(input));
+    signals.push(init?.signal);
     return fetch(input, init);
   };
-  return { fetchImpl, urls };
+  return { fetchImpl, urls, signals };
 }
 
 /** What is left in <dataDir>/native: nothing when the directory was never made. */
@@ -170,6 +196,36 @@ function nativeEntries(): string[] {
   const dir = join(dataDir, "native");
   return existsSync(dir) ? readdirSync(dir).sort() : [];
 }
+
+describe("readNativeLock", () => {
+  it("accepts the committed lock as the bundle imports it", () => {
+    expect(readNativeLock(committedLock)).toEqual(committedLock);
+  });
+
+  it("refuses a lock of another version", () => {
+    expect(() => readNativeLock({ ...structuredClone(committedLock), version: 2 })).toThrow(
+      new Error("Invalid native lock: version 2, expected 1"),
+    );
+  });
+
+  it("refuses a package pinned without a sha512 integrity", () => {
+    const sha1 = structuredClone(committedLock);
+    sha1.packages["@napi-rs/keyring"].integrity = "sha1-9i1SR6tYeQ3o1beLeVMxhN6Fq50=";
+
+    expect(() => readNativeLock(sha1)).toThrow(
+      new Error("Invalid native lock: package @napi-rs/keyring has no sha512 integrity"),
+    );
+  });
+
+  it("refuses a platform that names a package the lock does not pin", () => {
+    const unpinned = structuredClone(committedLock);
+    unpinned.platforms["darwin-x64"].canvas = "@napi-rs/canvas-darwin-x86";
+
+    expect(() => readNativeLock(unpinned)).toThrow(
+      new Error("Invalid native lock: platform darwin-x64 names @napi-rs/canvas-darwin-x86, which is not pinned"),
+    );
+  });
+});
 
 describe("lockHash", () => {
   it("is the first 12 hex digits of the sha256 of the lock's JSON", () => {
@@ -235,17 +291,11 @@ describe("ensureNativeRuntime", () => {
     const index = `module.exports = { name: "@napi-rs/canvas", next: true, binding: require("${CANVAS_PLATFORM}") };\n`;
     const next = await pack("@napi-rs/canvas", "1.0.12", index);
     served.set("/@napi-rs/canvas/-/canvas-1.0.12.tgz", next);
-    const upgraded: NativeLock = {
-      ...lock,
-      packages: {
-        ...lock.packages,
-        "@napi-rs/canvas": {
-          version: "1.0.12",
-          tarball: `${origin}/@napi-rs/canvas/-/canvas-1.0.12.tgz`,
-          integrity: integrityOf(next),
-        },
-      },
-    };
+    const upgraded = withPin("@napi-rs/canvas", {
+      version: "1.0.12",
+      tarball: `${origin}/@napi-rs/canvas/-/canvas-1.0.12.tgz`,
+      integrity: integrityOf(next),
+    });
 
     const second = await ensureNativeRuntime(options({ lock: upgraded }));
 
@@ -276,6 +326,40 @@ describe("ensureNativeRuntime", () => {
     expect(nativeEntries()).toEqual([]);
   });
 
+  it("fails the install on an entry tar cannot write, so that the next call downloads again", async () => {
+    // The pinned bytes themselves hold a file whose name is longer than any file system takes.
+    const unwritable = await pack(KEYRING_PLATFORM, "2.1.2", `module.exports = { name: "${KEYRING_PLATFORM}" };\n`, {
+      [`package/${"x".repeat(300)}.node`]: "not a binary",
+    });
+    served.set("/@napi-rs/keyring-linux-x64-gnu/-/keyring-linux-x64-gnu-2.1.2.tgz", unwritable);
+    const pinned = withPin(KEYRING_PLATFORM, { integrity: integrityOf(unwritable) });
+
+    await expect(ensureNativeRuntime(options({ lock: pinned }))).rejects.toMatchObject({ tarCode: "TAR_ENTRY_ERROR" });
+    expect(nativeEntries()).toEqual([]);
+
+    const { fetchImpl, urls } = recordingFetch();
+    await expect(ensureNativeRuntime(options({ lock: pinned, fetchImpl }))).rejects.toMatchObject({
+      tarCode: "TAR_ENTRY_ERROR",
+    });
+    expect(urls).toHaveLength(4);
+    expect(nativeEntries()).toEqual([]);
+  });
+
+  it("installs a package past tar's informational notices", async () => {
+    // After strip: 1, `package//notice.txt` is the absolute `/notice.txt`: tar strips the `/`, says
+    // so with a TAR_ENTRY_INFO warning, and writes the file inside the package.
+    const noticed = await pack(KEYRING_PLATFORM, "2.1.2", `module.exports = { name: "${KEYRING_PLATFORM}" };\n`, {
+      "package//notice.txt": "written all the same",
+    });
+    served.set("/@napi-rs/keyring-linux-x64-gnu/-/keyring-linux-x64-gnu-2.1.2.tgz", noticed);
+
+    const { nodeModulesDir } = await ensureNativeRuntime(
+      options({ lock: withPin(KEYRING_PLATFORM, { integrity: integrityOf(noticed) }) }),
+    );
+
+    expect(readFileSync(join(nodeModulesDir, KEYRING_PLATFORM, "notice.txt"), "utf8")).toBe("written all the same");
+  });
+
   it("rejects a refused download with the package and the status", async () => {
     served.delete("/@napi-rs/keyring/-/keyring-2.1.2.tgz");
 
@@ -283,16 +367,35 @@ describe("ensureNativeRuntime", () => {
     expect(nativeEntries()).toEqual([]);
   });
 
-  it("rejects a download that got no answer with the first line of the failure", async () => {
+  it("rejects a download from a closed port with the failure as its cause and no URL", async () => {
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const { port } = closed.address() as AddressInfo;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+    const tarball = `http://127.0.0.1:${port}/@napi-rs/canvas-linux-x64-gnu/-/canvas-linux-x64-gnu-1.0.11.tgz`;
+    const unreachable = withPin(CANVAS_PLATFORM, { tarball });
+
+    const err = await ensureNativeRuntime(options({ lock: unreachable })).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    const { message, cause } = err as Error;
+    expect(message).toMatch(/^Download failed for @napi-rs\/canvas-linux-x64-gnu: [^\n]+$/);
+    expect(message).not.toContain("127.0.0.1");
+    expect(cause).toBeInstanceOf(Error);
+    expect(nativeEntries()).toEqual([]);
+  });
+
+  it("keeps the first line of a failure's message only", async () => {
+    const failure = new Error("getaddrinfo ENOTFOUND registry.npmjs.org\n    at GetAddrInfoReqWrap.onlookupall");
     const fetchImpl: FetchLike = async (input: string | URL | Request, init?: RequestInit) => {
-      if (String(input).endsWith("/canvas-linux-x64-gnu-1.0.11.tgz")) {
-        throw new Error("getaddrinfo ENOTFOUND registry.npmjs.org\n    at GetAddrInfoReqWrap.onlookupall");
-      }
+      if (String(input).endsWith("/canvas-linux-x64-gnu-1.0.11.tgz")) throw failure;
       return fetch(input, init);
     };
 
     await expect(ensureNativeRuntime(options({ fetchImpl }))).rejects.toThrow(
-      new Error("Download failed for @napi-rs/canvas-linux-x64-gnu: getaddrinfo ENOTFOUND registry.npmjs.org"),
+      new Error("Download failed for @napi-rs/canvas-linux-x64-gnu: getaddrinfo ENOTFOUND registry.npmjs.org", {
+        cause: failure,
+      }),
     );
     expect(nativeEntries()).toEqual([]);
   });
@@ -301,6 +404,27 @@ describe("ensureNativeRuntime", () => {
     cutOff.add("/@napi-rs/keyring/-/keyring-2.1.2.tgz");
 
     await expect(ensureNativeRuntime(options())).rejects.toThrow(/^Download failed for @napi-rs\/keyring: [^\n]+$/);
+    expect(nativeEntries()).toEqual([]);
+  });
+
+  it("gives each download its own abort signal", async () => {
+    const { fetchImpl, signals } = recordingFetch();
+
+    await ensureNativeRuntime(options({ fetchImpl }));
+
+    expect(signals).toHaveLength(4);
+    for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal);
+    expect(new Set(signals).size).toBe(4);
+  });
+
+  it("aborts a download that stalls past its timeout", async () => {
+    stalled.add("/@napi-rs/keyring/-/keyring-2.1.2.tgz");
+
+    const err = await ensureNativeRuntime(options({ downloadTimeoutMs: 100 })).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe("Download failed for @napi-rs/keyring: timed out after 0.1 s");
+    expect((err as Error).cause).toHaveProperty("name", "AbortError");
     expect(nativeEntries()).toEqual([]);
   });
 

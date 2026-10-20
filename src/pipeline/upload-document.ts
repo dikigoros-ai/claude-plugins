@@ -3,7 +3,8 @@
 // @ 37f39ac5 (2026-10-19), ported to Node for one document per call, with an outcome in place of
 // React state. The server never parses a file: the helper hashes it, puts its bytes in the private
 // blob store, extracts the text and the scanned pages' images here, registers the document, hands
-// over the manifest and polls the processing until it is ready. A .txt or .md is posted as text.
+// over the manifest and polls the processing until it is ready, then sets the role and the side the
+// lawyer gave. A .txt or .md is posted as text.
 
 import { createHash } from "node:crypto";
 import type { BlobContentType, uploadBlob } from "../api/blob-upload";
@@ -26,7 +27,7 @@ export interface UploadContext {
   /** The signed-in user: a matter's blobs lie under matters/u<userId>/m<matterId>/. */
   userId: number;
   matterId: number;
-  /** Set with a PATCH right after the document is created, when given. */
+  /** Set with a PATCH once the document is ready, when given: over the server's own suggestion. */
   role?: string;
   side?: string;
 }
@@ -66,7 +67,11 @@ export interface DocumentOutcome {
   code?: string;
   /** A sentence for the lawyer: why, or what happens next. */
   message?: string;
-  /** When a role or a side was given: whether the server took it; false for a resumed twin, which is not patched. */
+  /**
+   * When a role or a side was given, for a document this upload made or resumed: whether the PATCH
+   * made once it was ready took them; false when it failed, or when the document never got ready.
+   * Not there for a duplicate, which keeps its own.
+   */
   roleApplied?: boolean;
 }
 
@@ -204,8 +209,8 @@ class DocumentUpload {
   }
 
   /**
-   * Creates the row and sets its role, then goes on with `next`; for a file the matter holds
-   * already (duplicate_document), the twin's way instead, `ingestPending` for a pending twin.
+   * Creates the row, then goes on with `next`; for a file the matter holds already
+   * (duplicate_document), the twin's way instead, `ingestPending` for a pending twin.
    */
   async #register(
     path: string,
@@ -221,14 +226,14 @@ class DocumentUpload {
       throw err;
     }
     this.#documentId = doc.id;
-    await this.#applyRole(doc.id);
     return next(doc);
   }
 
   /**
    * The twin a duplicate_document refusal names. One that is processing or failed is polled (its
    * processing resumed, as the matter page would); a pending one, when there is a manifest for it,
-   * is given it and polled. A ready twin, or one the server will not show, is a duplicate.
+   * is given it and polled. Either is then given the role and the side once ready, as a new document
+   * is. A ready twin, or one the server will not show, is a duplicate, which keeps its own.
    */
   async #twin(err: ApiError, ingestPending?: (twinId: number) => Promise<DocumentOutcome>): Promise<DocumentOutcome> {
     const duplicate = () => this.#outcome("duplicate", { message: describeApiError(err, this.#ctx.baseUrl) });
@@ -237,19 +242,18 @@ class DocumentUpload {
     this.#documentId = twinId;
     const read = () => this.#deps.api.getDocument(this.#ctx.matterId, twinId);
     const twin = await this.#call("GET", `${this.#documents}/${twinId}`, read).catch(refusedRead);
-    // A resumed twin is not ours to re-role: a role or a side given is not applied to it.
-    const resume = (next: () => Promise<DocumentOutcome>) => {
-      if (this.#ctx.role !== undefined || this.#ctx.side !== undefined) this.#roleApplied = false;
-      return next();
-    };
     if (twin?.ingestStatus === "processing" || twin?.ingestStatus === "failed") {
-      return resume(() => this.#poll(twinId, { pageCount: twin.pageCount }));
+      return this.#poll(twinId, { pageCount: twin.pageCount });
     }
-    if (twin?.ingestStatus === "pending" && ingestPending) return resume(() => ingestPending(twinId));
+    if (twin?.ingestStatus === "pending" && ingestPending) return ingestPending(twinId);
     return duplicate();
   }
 
-  /** Sets the role and the side given, right after creation; a 401 or a 403 leaves them unset. */
+  /**
+   * Sets the role and the side given, once the document is ready: the server's role suggestion and
+   * its source guide have run by then, and the lawyer's choice overrides the suggestion. Never
+   * fatal: any failure (a refusal of any status, no answer) leaves them unset, in one log line.
+   */
   async #applyRole(docId: number): Promise<void> {
     const { matterId, role, side } = this.#ctx;
     if (role === undefined && side === undefined) return;
@@ -258,18 +262,20 @@ class DocumentUpload {
     if (side !== undefined) input.side = side;
     const path = `${this.#documents}/${docId}`;
     try {
-      await this.#call("PATCH", path, () => this.#deps.api.patchDocument(matterId, docId, input));
+      await this.#deps.api.patchDocument(matterId, docId, input);
       this.#roleApplied = true;
     } catch (err) {
-      if (!(err instanceof ApiError && (err.status === 401 || err.status === 403))) throw err;
       this.#roleApplied = false;
-      this.#deps.log(`${this.#name}: role/side not applied (PATCH ${path} refused with ${err.status})`);
+      // Of a refusal only the status: its metadata can hold the user's email.
+      const why = err instanceof ApiError ? `refused with ${err.status}` : `failed: ${firstLine(err)}`;
+      this.#deps.log(`${this.#name}: role/side not applied (PATCH ${path} ${why})`);
     }
   }
 
   /**
    * Runs the processing a batch at a time, a poll every pollIntervalMs, until the document is
-   * ready or failed; after maxWaitMs of polling it is left processing, the row still resumable.
+   * ready (then given its role and side) or failed; after maxWaitMs of polling it is left
+   * processing, the row still resumable.
    */
   async #poll(docId: number, known: { pageCount?: number; ocrPages?: number }): Promise<DocumentOutcome> {
     const { api, sleep, now, log, pollIntervalMs = POLL_INTERVAL_MS, maxWaitMs = DEFAULT_MAX_WAIT_MS } = this.#deps;
@@ -288,6 +294,7 @@ class DocumentUpload {
       }
       if (result?.status === "ready") {
         const pageCount = result.document?.pageCount ?? known.pageCount;
+        await this.#applyRole(docId);
         return this.#outcome("ready", { pageCount, ocrPages: known.ocrPages });
       }
       if (result?.status === "failed") return this.#outcome("failed", because(result.errorCode ?? "processing_failed"));
@@ -313,9 +320,15 @@ class DocumentUpload {
     return call();
   }
 
-  /** The outcome: the document's id and the patch's result as far as known, then `fields`. */
+  /**
+   * The outcome: the document's id as far as known, whether a role or a side given was applied to a
+   * document this upload made or resumed (false unless the PATCH took it), then `fields`.
+   */
   #outcome(status: OutcomeStatus, fields: Omit<DocumentOutcome, "name" | "status"> = {}): DocumentOutcome {
-    const known = { documentId: this.#documentId, roleApplied: this.#roleApplied, ...fields };
+    const { role, side } = this.#ctx;
+    const owed = (role !== undefined || side !== undefined) && this.#documentId !== undefined && status !== "duplicate";
+    const roleApplied = owed ? (this.#roleApplied ?? false) : undefined;
+    const known = { documentId: this.#documentId, roleApplied, ...fields };
     const defined = Object.fromEntries(Object.entries(known).filter(([, value]) => value !== undefined));
     return { name: this.#name, status, ...(defined as typeof fields) };
   }

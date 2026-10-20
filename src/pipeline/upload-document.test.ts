@@ -15,7 +15,7 @@ import type {
 import { ApiError } from "../api/errors";
 import type { ExtractedPdf } from "../extract/pdf";
 import type { PlanEntry } from "../files/resolve";
-import { uploadDocument, type UploadContext, type UploadDeps } from "./upload-document";
+import { type DocumentOutcome, uploadDocument, type UploadContext, type UploadDeps } from "./upload-document";
 
 const CTX: UploadContext = { baseUrl: "https://dikigoros.ai", userId: 42, matterId: 7 };
 const STORE = "https://teststore.private.blob.vercel-storage.com/";
@@ -586,15 +586,16 @@ describe("uploadDocument: a file already in the matter", () => {
 
   it.each(["processing", "failed"] as const)("resumes the processing of a %s twin and follows it to ready", async (status) => {
     const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [twin(status)], process: [processing(1), ready(2)] });
-    // The twin is not ours to re-role: it is polled as it is, and the role given is not applied.
+    // Resumed, the twin is polled as it is, then given the role once it is ready, as a new document would be.
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, role: "exhibit" }, f.deps);
 
-    expect(f.calls.slice(4)).toEqual(["createDocument", "getDocument", "process", "sleep(1500)", "process"]);
+    expect(f.calls.slice(4)).toEqual(["createDocument", "getDocument", "process", "sleep(1500)", "process", "patchDocument"]);
     expect(f.api.process.mock.calls).toEqual([
       [7, 12],
       [7, 12],
     ]);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 12, pageCount: 2, roleApplied: false });
+    expect(f.api.patchDocument.mock.calls).toStrictEqual([[7, 12, { role: "exhibit" }]]);
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 12, pageCount: 2, roleApplied: true });
   });
 
   it("ingests the manifest it built into a pending twin, then polls it", async () => {
@@ -607,7 +608,16 @@ describe("uploadDocument: a file already in the matter", () => {
     // A run that died between the create and the ingest left the twin pending.
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, side: "ours" }, f.deps);
 
-    expect(f.calls.slice(4)).toEqual(["createDocument", "getDocument", "ingest", "process", "sleep(1500)", "process"]);
+    expect(f.calls.slice(4)).toEqual([
+      "createDocument",
+      "getDocument",
+      "ingest",
+      "process",
+      "sleep(1500)",
+      "process",
+      "patchDocument",
+    ]);
+    expect(f.api.patchDocument.mock.calls).toStrictEqual([[7, 12, { side: "ours" }]]);
     expect(f.api.ingest.mock.calls).toStrictEqual([
       [
         7,
@@ -631,7 +641,7 @@ describe("uploadDocument: a file already in the matter", () => {
       documentId: 12,
       pageCount: 2,
       ocrPages: 1,
-      roleApplied: false,
+      roleApplied: true,
     });
   });
 
@@ -682,11 +692,11 @@ describe("uploadDocument: role and side", () => {
     [{ role: "statement_of_claim" }, { role: "statement_of_claim" }],
     [{ side: "theirs" }, { side: "theirs" }],
     [{ role: "exhibit", side: "ours" }, { role: "exhibit", side: "ours" }],
-  ])("patches %j right after creation, before the ingest", async (given, body) => {
+  ])("patches %j once the processing is ready, over the server's own suggestion", async (given, body) => {
     const f = fakes();
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, ...given }, f.deps);
 
-    expect(f.calls.slice(4)).toEqual(["createDocument", "patchDocument", "ingest", "process"]);
+    expect(f.calls.slice(4)).toEqual(["createDocument", "ingest", "process", "patchDocument"]);
     expect(f.api.patchDocument.mock.calls).toStrictEqual([[7, 31, body]]);
     expect(outcome).toStrictEqual({
       name: "claim.pdf",
@@ -699,18 +709,18 @@ describe("uploadDocument: role and side", () => {
   });
 
   it.each([
-    [401, "Authentication required"],
-    [403, "email_not_verified"],
-  ])("goes on without the role when the patch is refused with %i", async (status, code) => {
-    const f = fakes({ patchDocument: [new ApiError(status, code, { email: "eleni@example.com" })] });
+    ["a 401", new ApiError(401, "Authentication required", { email: "eleni@example.com" }), "refused with 401"],
+    ["a 403", new ApiError(403, "email_not_verified", { email: "eleni@example.com" }), "refused with 403"],
+    ["a 500", new ApiError(500, "http_500"), "refused with 500"],
+    ["a request that got no answer", new TypeError("fetch failed\n    at node:internal/deps/undici:1:1"), "failed: fetch failed"],
+  ])("keeps the document ready without the role when the patch meets %s, and logs one line", async (_what, err, why) => {
+    const f = fakes({ patchDocument: [err] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, role: "exhibit" }, f.deps);
 
-    expect(f.calls.slice(4)).toEqual(["createDocument", "patchDocument", "ingest", "process"]);
-    expect(f.log).toHaveBeenCalledTimes(1);
-    const [line] = f.log.mock.calls[0];
-    expect(line).toContain("claim.pdf");
-    expect(line).toContain(`PATCH /api/matters/7/documents/31`);
-    expect(line).not.toContain("eleni@example.com");
+    expect(f.calls.slice(4)).toEqual(["createDocument", "ingest", "process", "patchDocument"]);
+    expect(f.log.mock.calls).toEqual([
+      [`claim.pdf: role/side not applied (PATCH /api/matters/7/documents/31 ${why})`],
+    ]);
     expect(outcome).toStrictEqual({
       name: "claim.pdf",
       status: "ready",
@@ -721,24 +731,46 @@ describe("uploadDocument: role and side", () => {
     });
   });
 
-  it("fails the document on any other refusal of the patch", async () => {
-    const f = fakes({ patchDocument: [new ApiError(500, "http_500")] });
-    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, side: "ours" }, f.deps);
-    expect(f.api.ingest).not.toHaveBeenCalled();
+  it.each([
+    [
+      "left processing at the end of the wait",
+      { process: [processing(2), processing(2), processing(1), processing(1)] },
+      { status: "processing", ocrRemaining: 1, message: STILL_PROCESSING },
+    ],
+    [
+      "failed in its processing",
+      { process: [{ status: "failed", ocrRemaining: 0, errorCode: "no_text_extracted" } satisfies ProcessResult] },
+      { status: "failed", code: "no_text_extracted", message: "No readable text found — the pages appear to be blank" },
+    ],
+  ] satisfies Array<[string, Answers, Partial<DocumentOutcome>]>)(
+    "does not patch a document %s, and says the role is not applied",
+    async (_what, answers, ended) => {
+      const f = fakes(answers);
+      const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, side: "ours" }, { ...f.deps, maxWaitMs: 3000 });
+
+      expect(f.api.patchDocument).not.toHaveBeenCalled();
+      expect(outcome).toStrictEqual({ name: "claim.pdf", documentId: 31, ...ended, roleApplied: false });
+    },
+  );
+
+  it("does not patch a twin that is ready already, which keeps its own role", async () => {
+    const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [twin("ready")] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, role: "exhibit" }, f.deps);
+
+    expect(f.api.patchDocument).not.toHaveBeenCalled();
     expect(outcome).toStrictEqual({
       name: "claim.pdf",
-      status: "failed",
-      documentId: 31,
-      code: "http_500",
-      message: "500 http_500",
+      status: "duplicate",
+      documentId: 12,
+      message: "This file is already in the matter (document #12).",
     });
   });
 
-  it("patches a text document's role before polling it", async () => {
+  it("patches a text document's role once it is ready", async () => {
     const f = fakes({ readFile: [utf8("Επιστολή προς τον συνήγορο της άλλης πλευράς.")], process: [ready(1)] });
     const outcome = await uploadDocument(planned("επιστολή.md", "text"), { ...CTX, role: "correspondence" }, f.deps);
 
-    expect(f.calls).toEqual(["readFile", "createTextDocument", "patchDocument", "process"]);
+    expect(f.calls).toEqual(["readFile", "createTextDocument", "process", "patchDocument"]);
     expect(f.api.patchDocument.mock.calls).toStrictEqual([[7, 32, { role: "correspondence" }]]);
     expect(outcome).toStrictEqual({
       name: "επιστολή.md",

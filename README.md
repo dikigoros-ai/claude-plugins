@@ -119,9 +119,11 @@ call left unfinished is picked up where it stopped rather than reported as a dup
 
 ### Roles and sides
 
-`role` and `side`, when given, apply to every file of the call. They are set on each new document right after it is
-created, so that the server's own suggestion does not replace them. A document already in the matter keeps its own.
-When the server refuses to set them, the upload goes on and the result says `role_applied: false`.
+`role` and `side`, when given, apply to every file of the call. They are set after processing finishes, once the
+server has made its own suggestion, which they then override; if the server refuses to set them, the result says
+`role_applied: false`. The upload goes on whatever the server answers: the file stays uploaded and processed. A
+document still processing when the call ends is left without them (`role_applied: false`). A file already in the
+matter keeps its own, unless an earlier call left it unfinished: then it gets them once its processing finishes.
 
 - Roles: `statement_of_claim`, `defense`, `reply`, `affidavit`, `opposition`, `witness_statement`, `exhibit`,
   `interim_application`, `court_order`, `correspondence`, `other`, `written_submission`, `judgment`,

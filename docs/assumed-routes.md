@@ -20,6 +20,10 @@ main app accepts such a token only on the routes of its connector-token allowlis
 > - **`PATCH /api/matters/[id]/documents/[docId]` (`matters:write`, role and side only).** A `role` or `side` given
 >   to `upload_to_matter`. Until then they are left unset (`role_applied: false`) and the upload goes on.
 
+The spec's §5.5 says "no document PATCH through the connector at launch" for the MCP tools, so allowlisting the
+`PATCH` for helper tokens is an owner decision for PR 4. If it is declined, the helper still accepts `role` and `side`
+and always reports `role_applied: false`.
+
 ## Every request
 
 - `Authorization: Bearer <access token>` and `Accept: application/json`; with a body, `Content-Type:
@@ -45,7 +49,7 @@ Scopes: `matters:read` for the `GET`s under `/api/matters`, `matters:write` for 
 | `POST` | `…/upload` | `matters:write` | [the client-token event](#the-client-token-event) | 200 `{ type: "blob.generate-client-token", clientToken }` | Any refusal fails that file |
 | `POST` | `…` | `matters:write` | `filename`, `mimeType`, `sizeBytes`, `sha256` (64 hex), `blobUrl`, `headBytesBase64` (the first 8 bytes) | 201 `{ document }`, `ingestStatus: "pending"` | 409 `duplicate_document` (`documentId`): see [Files already in the matter](#files-already-in-the-matter). 429 `document_limit_reached` (`limit`), 415 `Unsupported file type`: the file fails |
 | `POST` | `…/text` | `matters:write`, **not allowlisted** | `filename`, `text` | 201 `{ document }`, `ingestStatus: "processing"`, one page | As for `POST …` |
-| `PATCH` | `…/{docId}` | `matters:write`, **not allowlisted**, role and side only | `role`, `side` (one or both) | 200 `{ document }` | 401 or 403: role and side left unset (`role_applied: false`); the upload goes on |
+| `PATCH` | `…/{docId}` | `matters:write`, **not allowlisted**, role and side only | `role`, `side` (one or both), sent once the processing is `ready`, to a new document or a resumed one | 200 `{ document }` | Any refusal, or no answer: role and side left unset (`role_applied: false`), one log line; the file stays `ready` |
 | `POST` | `…/{docId}/ingest` | `matters:write` | [the manifest](#the-manifest) | 200 `{ ocrPages }` | `too_many_ocr_pages` (`limit`), `manifest_too_large`, `Weekly usage limit reached`: the file fails with their sentences |
 | `POST` | `…/{docId}/process` | `matters:write` | none | 200 `{ status, ocrRemaining, suggested?, errorCode?, document? }` | 409 `processing_in_progress`, a 5xx, a 429 or no answer: polled again. `status: "failed"`: the file fails with `errorCode` (`no_text_extracted`), else `processing_failed` |
 | `GET` | `…/{docId}` | `matters:read` | none | 200 `{ document }` with `ingestStatus`, `pageCount` and `pages` | 401, 403 or 404: the file is reported as a duplicate of that document |
@@ -176,7 +180,9 @@ goes straight to polling.
 `POST …/{docId}/process` is polled every 1.5 seconds until it answers `ready` or `failed`; `ocrRemaining` is logged as
 progress. After 10 minutes of polling the file is reported `processing`, with the last `ocrRemaining`: the row stays,
 and the matter page or a later call resumes it. On `ready`, `document` is `{ id, filename, role, side,
-roleConfirmed, ingestStatus, pageCount, ocrApplied, extractedText }`, of which the helper reads `pageCount`.
+roleConfirmed, ingestStatus, pageCount, ocrApplied, extractedText }`, of which the helper reads `pageCount`. Then,
+when the call gave a role or a side, the helper sends the `PATCH`: the server's role suggestion and source guide have
+run by then, and the lawyer's choice overrides the suggestion.
 
 ## Files already in the matter
 
@@ -188,8 +194,9 @@ bytes (or the same text). The helper reads it with `GET …/{docId}`:
 - `pending`, left so by a run that stopped between registering and ingesting: the manifest just built is ingested
   into it, and it is polled.
 
-A role or side given in the call is not applied to such a document. A PDF or DOCX is put in the store before
-`POST …`, so a file already in the matter is put there once more, as with the web uploader.
+A role or side given in the call is set on a resumed document (processing, failed or pending) once it is `ready`, as
+on a new one; a `ready` twin keeps its own. A PDF or DOCX is put in the store before `POST …`, so a file already in
+the matter is put there once more, as with the web uploader.
 
 ## The calls, in order
 

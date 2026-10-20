@@ -9,11 +9,11 @@ The `dikigoros` plugin connects Claude to [DIKIGOROS AI](https://dikigoros.ai). 
   DIKIGOROS matter, through the same routes and steps as the uploader on dikigoros.ai. The remote connector cannot do
   this: MCP has no channel for files.
 
-> **0.1.0 is not live yet.** Until the DIKIGOROS Auth0 application exists and its client id is set in
-> `src/config.ts`, the helper answers every tool call with "The helper is not configured (DIKIGOROS_AUTH0_CLIENT_ID is
-> empty)." That is expected in this release.
-> Uploads of `.txt` and `.md` files, and roles and sides, also wait for dikigoros.ai to accept the helper's sign-in
-> on two more routes ([docs/assumed-routes.md](docs/assumed-routes.md)).
+> **0.1.0 is not live yet.** It needs the main app's PR 1 deployed on dikigoros.ai: the routes the helper calls exist
+> only with it. Until the DIKIGOROS Auth0 application exists and its client id is set in `src/config.ts`, the helper
+> answers every tool call with "The helper is not configured (DIKIGOROS_AUTH0_CLIENT_ID is empty)." That is expected
+> in this release. Uploads of `.txt` and `.md` files, and roles and sides, also wait for dikigoros.ai to accept the
+> helper's sign-in on two more routes, the main app's PR 4 ([docs/assumed-routes.md](docs/assumed-routes.md)).
 
 ## Install
 
@@ -50,8 +50,10 @@ installed into `$CLAUDE_PLUGIN_DATA/native/<lock hash>/node_modules` (`~/.dikigo
 `CLAUDE_PLUGIN_DATA` is not set), where later processes find them.
 
 Each package's download may take at most 5 minutes: the 13 MB canvas package needs about 43 KB/s. A failed install
-is tried again on the next tool call. On a machine that cannot download them, set `DIKIGOROS_HELPER_NATIVE_DIR` to a
-`node_modules` directory that already holds both packages and their platform packages; nothing is downloaded then.
+is tried again by the next confirmed upload that includes a PDF; the keychain fallback it brings (see
+[Troubleshooting](#troubleshooting)) lasts until Claude restarts. On a machine that cannot download them, set
+`DIKIGOROS_HELPER_NATIVE_DIR` to a `node_modules` directory that already holds both packages and their platform
+packages; nothing is downloaded then.
 
 Supported platforms: macOS on Apple silicon and Intel (`darwin-arm64`, `darwin-x64`), Linux with glibc on x64 and
 arm64 (`linux-x64-gnu`, `linux-arm64-gnu`), Windows on x64 and arm64 (`win32-x64-msvc`, `win32-arm64-msvc`). Linux
@@ -180,12 +182,15 @@ the stored refresh token, the helper deletes the entry itself and answers with a
 | Token refresh: when the access token has a minute or less left, or dikigoros.ai refused it | The client id and the refresh token | The Auth0 tenant |
 | The first tool call, until the native components are installed | Requests for the pinned packages; what comes back is checked against the committed lock | registry.npmjs.org |
 | `create_matter` | The title, type, case reference and description | `https://dikigoros.ai` |
-| `upload_to_matter` with `confirm: true` | Each PDF's and DOCX's bytes, and the JPEG of each page that needs OCR (scanned pages) | The DIKIGOROS private blob store (Vercel Blob, EU), straight from this computer |
+| `upload_to_matter` with `confirm: true` | Each PDF's and DOCX's bytes, and the JPEG of each page that needs OCR (scanned pages), under the pathname `matters/u<userId>/m<matterId>/<file name>` (a page's: `…/pages/p<n>.jpg`): the file name and the ids are the blob's name | The DIKIGOROS private blob store (Vercel Blob, EU), straight from this computer |
 | `upload_to_matter` with `confirm: true` | Each file's name, size, SHA-256 and first 8 bytes; its extracted text (the manifest); a `.txt` or `.md` file's text; the role and side, when given | `https://dikigoros.ai` |
 
 Every request to dikigoros.ai carries the access token. The first call of `upload_to_matter`, the listing, reads the
 files' names, sizes and first bytes on this computer and sends nothing about them: it asks dikigoros.ai for the
 account and the matter only. Nothing else leaves this computer: the helper sends no telemetry.
+
+The tools' answers, the files' names and sizes and the folder paths among them, are part of the conversation with
+Claude, like anything else Claude reads.
 
 ## Configuration
 
@@ -223,9 +228,10 @@ another project, they would send the files and their upload tokens somewhere oth
 - The plan's limit of documents per matter: a matter that holds as many already takes nothing, and the call says so
   before uploading anything. A matter with room for some of the files takes them; each file past the limit then fails
   on its own (`document_limit_reached`).
-- A file whose bytes are already in the matter is reported as a duplicate: no second document is created. Its bytes
-  still go to the blob store first, as with the uploader on dikigoros.ai. When an earlier call left that document
-  unfinished, it is picked up where it stopped instead.
+- A file whose bytes are already in the matter is reported as a duplicate: no second document is created. A PDF's
+  or a DOCX's bytes still go to the blob store first, as with the uploader on dikigoros.ai; a `.txt` or `.md` file
+  sends no bytes to the store at all, only its text to dikigoros.ai, which finds the duplicate. When an earlier call
+  left that document unfinished, it is picked up where it stopped instead.
 
 ## Troubleshooting
 
@@ -242,9 +248,9 @@ helper with is older than 22.13. Install Node.js 22 LTS (22.13 or later), as abo
 still upload.
 
 **PDFs fail with `native_runtime_unavailable`.** The native components could not be installed; the message says
-why (`Download failed for <package>: …`, `Integrity mismatch for <package>`). The install is tried again on the next
-call. The downloads must reach registry.npmjs.org and finish within 5 minutes each; otherwise provide the packages
-through `DIKIGOROS_HELPER_NATIVE_DIR`.
+why (`Download failed for <package>: …`, `Integrity mismatch for <package>`). The install is tried again by the next
+confirmed upload that includes a PDF. The downloads must reach registry.npmjs.org and finish within 5 minutes each;
+otherwise provide the packages through `DIKIGOROS_HELPER_NATIVE_DIR`.
 
 **`The OS keychain is not available on this machine (…); the sign-in is kept in memory for this session only.`**
 The helper could not use the keychain, so you sign in again each time the helper starts. The reason in brackets says
@@ -255,8 +261,15 @@ them. The fallback lasts as long as the helper process: once the cause is fixed,
 application exists (see the note at the top).
 
 **`Could not reach the sign-in service (…). Nothing was changed; try again in a moment.`** The Auth0 tenant could not
-be reached, gave no usable answer or refused to start a sign-in, or the keychain could not be read. A stored sign-in
-is kept; call the tool again later.
+be reached, gave no usable answer or refused to start a sign-in, or the keychain could not be read, as the call
+started. A stored sign-in is kept; call the tool again later. The same failure in the middle of a call, when
+dikigoros.ai refused the access token and the helper asked Auth0 for a new one, reads `Could not reach DIKIGOROS (…)`
+instead, or fails the file at hand with code `network`.
+
+**`fetch failed` behind a firm's proxy.** Node.js's `fetch`, which the helper uses, does not go through the proxy
+that `HTTPS_PROXY` or `HTTP_PROXY` names: on a network that reaches the internet only through a proxy, every request
+of the helper fails as `fetch failed`, whether to Auth0, dikigoros.ai, the blob store or registry.npmjs.org. This
+release has no proxy support.
 
 **`The server refused the helper's sign-in for <METHOD> <path>; this route may not accept helper tokens yet
 (docs/assumed-routes.md)`.** dikigoros.ai refused the helper's token on that route, even after a refresh. In 0.1.0
@@ -270,15 +283,16 @@ Requires Node.js 22.13 or later.
 
 ```
 npm ci                                       # dependencies, the native components among them for the tests
-npm run check                                # lint, typecheck and the tests
 npm run build                                # the bundle and pdf.js's files into plugins/dikigoros/server/
+npm run check                                # lint, typecheck and the tests, the smoke test on the bundle just built
 claude plugin validate ./plugins/dikigoros   # the plugin manifest
 claude plugin validate .                     # the marketplace
 ```
 
-The tests run offline. `test/integration/upload-flow.test.ts` runs the whole upload against an in-memory DIKIGOROS
-API and blob store on 127.0.0.1 (`test/support/fake-api.ts`). `test/plugin-smoke.test.ts` starts the committed
-bundle: after changing `src/`, build before testing.
+Build before `npm run check`: `test/plugin-smoke.test.ts` starts the bundle under `plugins/dikigoros/server/`, so
+after a change to `src/` it would test the old one. The tests run offline. The unit tests sit beside the sources in
+`src/` (`*.test.ts`); the smoke and integration tests are in `test/`. `test/integration/upload-flow.test.ts` runs the
+whole upload against an in-memory DIKIGOROS API and blob store on 127.0.0.1 (`test/support/fake-api.ts`).
 
 `node plugins/dikigoros/server/dikigoros-upload.mjs --extract-check <file.pdf>` starts no server: it reads the PDF
 with the bundle's pdf.js and prints one line, `{"pages":…,"needsOcr":…,"images":…}`, a check that page rendering

@@ -8,9 +8,9 @@ routes (`dikigoros-ai/dikigoros-ai` at `37f39ac5`, 2026-10-19: `app/api/matters/
 Nothing is imported from that repository: when a route changes there, this file, the client and the fake change with
 it.
 
-The helper's access token is an Auth0 token for the audience `https://dikigoros.ai/mcp`, the remote connector's. The
-main app accepts such a token only on the routes of its connector-token allowlist (`CONNECTOR_TOKEN_ROUTES` in
-`lib/mcp/auth.ts`), each with the scope it names.
+The helper's access token is an Auth0 token for the audience `https://dikigoros.ai/mcp`, the remote connector's. With
+PR 1 deployed, the main app accepts such a token only on the routes of its connector-token allowlist
+(`CONNECTOR_TOKEN_ROUTES` in `lib/mcp/auth.ts`), each with the scope it names.
 
 > **Two routes the helper calls are not in PR 1's `CONNECTOR_TOKEN_ROUTES` and must be added by the main series'
 > PR 4:**
@@ -43,7 +43,7 @@ Scopes: `matters:read` for the `GET`s under `/api/matters`, `matters:write` for 
 
 | Method | Path | Scope | Request body | Success | Errors handled |
 |---|---|---|---|---|---|
-| `GET` | `/auth/current-user` | `account:read` | none | 200, the user: `id`, `email`, `plan`, `entitlements: { mattersAccess, docsPerMatter, activeMatters, tier }` and more, which is ignored | 401 after the retry: the session is forgotten and a new sign-in starts. `mattersAccess: false`: the plan sentence; nothing is uploaded |
+| `GET` | `/auth/current-user` | `account:read` | none | 200, the user: `id`, `email`, `plan`, `entitlements: { mattersAccess, docsPerMatter, activeMatters, tier }` and more, which is ignored | 401 after the retry: the session is forgotten and a new sign-in starts. `mattersAccess: false`: the plan sentence; nothing is listed or uploaded |
 | `GET` | `/api/matters` | `matters:read` | none | 200 `{ matters: [{ id, title, caseReference, matterType, status, updatedAt, documentCount }] }` | In the client only: no tool calls it in 0.1.0 |
 | `POST` | `/api/matters` | `matters:write` | `title`; optional `caseReference`, `matterType`, `description` | 201 `{ matter: { id, userId, title, caseReference, matterType, description, status, deletedAt, createdAt, updatedAt } }` | 401 after the retry: the session is forgotten and a new sign-in starts. 429 `matter_limit_reached` (`limit`), 403 `entitlement_required`: their sentences |
 | `GET` | `/api/matters/{id}` | `matters:read` | none | 200 `{ matter, documents, pins, notes, artifacts }`; the helper reads the matter's `title` and counts `documents` against `docsPerMatter`: a matter that holds that many takes no upload | 404: "Matter not found (or not yours)."; nothing is listed or uploaded |
@@ -92,9 +92,9 @@ Other refusals become these sentences (`src/api/errors.ts`), in the call's resul
 | any other 404 | Matter not found (or not yours). |
 | anything else | `<status> <code>` |
 
-A request that gets no answer: for `create_matter`, and for the account and matter checks before the uploads, the
-call fails with "Could not reach DIKIGOROS (…)"; for the routes of one file's upload, that file fails with code
-`network`, but for a poll of `…/{docId}/process`, which is made again.
+A request that gets no answer: for `create_matter`, and for the account and matter checks that start every call of
+`upload_to_matter`, the call fails with "Could not reach DIKIGOROS (…)"; for the routes of one file's upload, that
+file fails with code `network`, but for a poll of `…/{docId}/process`, which is made again.
 
 ## The blob store
 
@@ -203,23 +203,30 @@ the matter is put there once more, as with the web uploader.
 
 ## The calls, in order
 
-What the integration test records for a folder of `brief.docx`, `claim.pdf`, `notes.txt` and `scan.pdf` (one
-scanned page), uploaded into matter 1 of user 7. `…` is `/api/matters/1/documents`; the fake answers `processing`
-twice before `ready`. The first call of `upload_to_matter`, without `confirm`, makes no request at all.
+What the integration test records for a folder of `brief.docx`, `ccitt-g4.pdf` (one scanned page, CCITT G4),
+`notes.txt`, `scan.pdf` (one scanned page) and `Αγωγή αρ. 5 (αντίγραφο).pdf`, uploaded into matter 1 of user 7. `…`
+is `/api/matters/1/documents`; the fake answers `processing` twice before `ready`. The first call of
+`upload_to_matter`, the listing, makes two requests to DIKIGOROS, `GET /auth/current-user` and `GET /api/matters/1`,
+and none to the store: nothing about the files is sent. (The sign-in check before any call can still refresh the
+access token with Auth0.)
 
 ```
 POST /api/matters                      create_matter
-GET  /auth/current-user                upload_to_matter, confirm: true
+GET  /auth/current-user                upload_to_matter, the listing
+GET  /api/matters/1
+GET  /auth/current-user                upload_to_matter, confirm: true and the listing's plan_digest
 GET  /api/matters/1
 POST …/upload                          brief.docx
 PUT  store  matters/u7/m1/brief.docx
 POST …                                 201, document 1
 POST …/1/ingest                        kind docx
 POST …/1/process  ×3
-POST …/upload                          claim.pdf
-PUT  store  matters/u7/m1/claim.pdf
+POST …/upload                          ccitt-g4.pdf
+PUT  store  matters/u7/m1/ccitt-g4.pdf
+POST …/upload                          its page 1
+PUT  store  matters/u7/m1/pages/p1.jpg
 POST …                                 201, document 2
-POST …/2/ingest                        kind pdf, no page needing OCR
+POST …/2/ingest                        kind pdf, page 1 needing OCR, with its imageBlobKey
 POST …/2/process  ×3
 POST …/text                            notes.txt: 201, document 3
 POST …/3/process  ×3
@@ -230,11 +237,17 @@ PUT  store  matters/u7/m1/pages/p1.jpg
 POST …                                 201, document 4
 POST …/4/ingest                        kind pdf, page 1 needing OCR, with its imageBlobKey
 POST …/4/process  ×3
+POST …/upload                          Αγωγή αρ. 5 (αντίγραφο).pdf
+PUT  store  matters/u7/m1/Αγωγή αρ. 5 (αντίγραφο).pdf
+POST …                                 201, document 5
+POST …/5/ingest                        kind pdf, no page needing OCR
+POST …/5/process  ×3
 ```
 
-The same confirmed call made again: each PDF and DOCX is put in the store again (scan.pdf's page image too),
-`POST …` and `POST …/text` answer 409 `duplicate_document`, and `GET …/{docId}` finds each twin `ready`: the four
-files are reported `duplicate`.
+Both scans put a page 1 under the same pathname; the store's random suffix tells the two blobs apart, and each
+manifest names its own. The same confirmed call made again: each PDF and DOCX is put in the store again (the scans'
+page images too), `POST …` and `POST …/text` answer 409 `duplicate_document`, and `GET …/{docId}` finds each twin
+`ready`: the five files are reported `duplicate`.
 
 ## Auth0
 
@@ -244,7 +257,7 @@ redirects refused and a 30-second timeout.
 | Request | Form fields | Answer read | Errors handled |
 |---|---|---|---|
 | `POST /oauth/device/code` | `client_id`; `scope`: `openid offline_access matters:read matters:write account:read`; `audience`: `https://dikigoros.ai/mcp` (`http://localhost:3000/mcp` against a local DIKIGOROS) | `device_code`, `user_code`, `verification_uri`, `verification_uri_complete`, `expires_in`, `interval` | Any refusal, or no answer: "Could not reach the sign-in service (…)"; nothing changes |
-| `POST /oauth/token`, device code grant | `grant_type`: `urn:ietf:params:oauth:grant-type:device_code`; `device_code`; `client_id` | `access_token`, `expires_in`, `token_type`, `refresh_token`, `scope` | `authorization_pending`: polled again after `interval` seconds. `slow_down`: `interval` 5 seconds longer from then on. No answer, a timeout or a 5xx: `interval` doubled, polled again. Any other error (`expired_token`, `access_denied`, …) ends the sign-in, and so does `expires_in` running out; the next tool call starts a new one |
+| `POST /oauth/token`, device code grant | `grant_type`: `urn:ietf:params:oauth:grant-type:device_code`; `device_code`; `client_id` | `access_token`, `expires_in`, `token_type`, `refresh_token` (the answer's `scope` is not read) | `authorization_pending`: polled again after `interval` seconds. `slow_down`: `interval` 5 seconds longer from then on. No answer, a timeout or a 5xx: `interval` doubled, polled again. Any other error (`expired_token`, `access_denied`, …) ends the sign-in, and so does `expires_in` running out; the next tool call starts a new one |
 | `POST /oauth/token`, refresh token grant | `grant_type`: `refresh_token`; `client_id`; `refresh_token` | As above; a new `refresh_token` replaces the stored one | A 4xx with an OAuth error other than `too_many_requests` (`invalid_grant`, …): the stored refresh token is deleted and a new sign-in starts. No answer, a timeout, a 5xx, a 429, a 4xx without an OAuth error, or an answer without the token fields: "Could not reach the sign-in service (…)"; the refresh token is kept |
 
 The device code is polled in the helper's process, in the background, while the tool's answer carries the link and

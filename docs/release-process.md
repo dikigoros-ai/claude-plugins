@@ -56,9 +56,8 @@ runs lint, the typecheck and the tests; the smoke test starts the bundle just bu
 ## 4. Commit and tag
 
 Commit the version bump together with the regenerated `plugins/` output and the changelog: every file the build
-changed or added, as the CI guard below fails on either. Tag the release commit `v<version>`, for example `v0.1.0`.
-
-Commits are made through the GitHub API, which signs them (house rule).
+changed or added, as the CI guard below fails on either. Release commits are signed (the repository requires it).
+Tag the release commit `v<version>`, for example `v0.1.0`.
 
 ## 5. CI
 
@@ -72,5 +71,3 @@ pass, and neither can a hand edit of the bundle.
 
 Installed clients pick up a new version when the marketplace entry's `version` changes: that entry is what tells them
 to update, so it moves with every release (step 1).
-
-The repository stays private until the operator makes it public.

@@ -28,31 +28,31 @@ describe("openBrowser", () => {
     ["darwin", "open", [VERIFICATION_URI_COMPLETE]],
     ["win32", "cmd", ["/c", "start", "", VERIFICATION_URI_COMPLETE]],
     ["linux", "xdg-open", [VERIFICATION_URI_COMPLETE]],
-  ] as const)("on %s runs %s detached, its output ignored, without waiting for it", (platform, command, args) => {
+  ] as const)("on %s runs %s detached, its output ignored, no console window, without waiting for it", (platform, command, args) => {
     const fake = fakeSpawn();
     openBrowser(VERIFICATION_URI_COMPLETE, fake.spawnImpl, platform);
-    expect(fake.launches).toEqual([{ command, args, options: { detached: true, stdio: "ignore" } }]);
+    expect(fake.launches).toEqual([{ command, args, options: { detached: true, stdio: "ignore", windowsHide: true } }]);
     expect(fake.unrefs()).toBe(1);
   });
 
   it.each([
-    "http://dikigoros-prod.eu.auth0.com/activate?user_code=WDJB-MJHT",
-    "file:///etc/passwd",
-    "javascript:alert(1)",
-    "-a Calculator",
-    "",
-  ])("refuses %j: only an https:// URL is opened", (url) => {
+    ["an http: URL", "http://dikigoros-prod.eu.auth0.com/activate?user_code=WDJB-MJHT"],
+    ["a file: URL", "file:///etc/passwd"],
+    ["a javascript: URL", "javascript:alert(1)"],
+    ["a command-line option", "-a Calculator"],
+    ["an empty string", ""],
+  ])("refuses %s: only an https:// URL is opened", (_kind, url) => {
     const fake = fakeSpawn();
     openBrowser(url, fake.spawnImpl, "darwin");
     expect(fake.launches).toEqual([]);
   });
 
   it.each([
-    "https://dikigoros-prod.eu.auth0.com/activate?user_code=WDJB-MJHT&calc.exe",
-    "https://dikigoros-prod.eu.auth0.com/activate?user_code=WDJB-MJHT|calc.exe",
-    "https://dikigoros-prod.eu.auth0.com/%PATH%",
-    'https://dikigoros-prod.eu.auth0.com/" calc.exe',
-  ])("on win32 refuses %j, which cmd.exe would read as more than a URL", (url) => {
+    ["an ampersand", "https://dikigoros-prod.eu.auth0.com/activate?user_code=WDJB-MJHT&calc.exe"],
+    ["a pipe", "https://dikigoros-prod.eu.auth0.com/activate?user_code=WDJB-MJHT|calc.exe"],
+    ["a percent sign", "https://dikigoros-prod.eu.auth0.com/%PATH%"],
+    ["a double quote and a space", 'https://dikigoros-prod.eu.auth0.com/" calc.exe'],
+  ])("on win32 refuses a URL with %s, which cmd.exe would read as more than a URL", (_kind, url) => {
     const fake = fakeSpawn();
     openBrowser(url, fake.spawnImpl, "win32");
     expect(fake.launches).toEqual([]);

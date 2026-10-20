@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { HelperConfig } from "../config";
 import { DeviceFlowError, type FetchLike, pollDeviceToken, refreshAccessToken, requestDeviceCode } from "./device-flow";
 
@@ -41,6 +41,8 @@ const POLL_REQUEST = {
   url: TOKEN_URL,
   headers: FORM_HEADERS,
   form: { grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: "dc-secret-4f1a", client_id: "client-123" },
+  redirect: "error",
+  signal: expect.any(AbortSignal),
 };
 
 type Answer = () => Promise<Response>;
@@ -53,11 +55,21 @@ function text(status: number, body: string, contentType: string): Answer {
   return async () => new Response(body, { status, headers: { "Content-Type": contentType } });
 }
 
+/** No answer at all: the connection failed, or the request timed out. */
+function noAnswer(error: Error): Answer {
+  return () => Promise.reject(error);
+}
+
+const connectionFailure = () => new TypeError("fetch failed");
+const timeout = () => new DOMException("The operation was aborted due to timeout", "TimeoutError");
+
 interface RecordedRequest {
   method: string | undefined;
   url: string;
   headers: Record<string, string>;
   form: Record<string, string>;
+  redirect: RequestRedirect | undefined;
+  signal: AbortSignal | null | undefined;
 }
 
 /** The request's headers, names lower-cased. */
@@ -78,6 +90,8 @@ function recordingFetch(...answers: Answer[]): { fetchImpl: FetchLike; requests:
       url: String(input),
       headers: headerRecord(init?.headers),
       form: Object.fromEntries(new URLSearchParams(String(init?.body))),
+      redirect: init?.redirect,
+      signal: init?.signal,
     });
     const next = answers.shift();
     if (next === undefined) throw new Error(`no answer left for request ${requests.length} (${String(input)})`);
@@ -109,7 +123,13 @@ async function refused(promise: Promise<unknown>): Promise<DeviceFlowError> {
     (reason: unknown) => reason,
   );
   expect(err).toBeInstanceOf(DeviceFlowError);
+  expect((err as Error).name).toBe("DeviceFlowError");
   return err as DeviceFlowError;
+}
+
+/** What a test checks of a DeviceFlowError: everything it carries. */
+function shown(err: DeviceFlowError): { code: string; status: number; message: string } {
+  return { code: err.code, status: err.status, message: err.message };
 }
 
 describe("requestDeviceCode", () => {
@@ -126,18 +146,17 @@ describe("requestDeviceCode", () => {
           scope: "openid offline_access matters:read matters:write account:read",
           audience: "https://dikigoros.ai/mcp",
         },
+        redirect: "error",
+        signal: expect.any(AbortSignal),
       },
     ]);
   });
 
-  it("throws Auth0's refusal as a DeviceFlowError naming its code and description", async () => {
+  it("throws Auth0's refusal as a DeviceFlowError naming its code, status and description", async () => {
     const description = "Grant type 'urn:ietf:params:oauth:grant-type:device_code' not allowed for the client.";
     const { fetchImpl } = recordingFetch(json(403, { error: "unauthorized_client", error_description: description }));
     const err = await refused(requestDeviceCode(TENANT, fetchImpl));
-    expect({ code: err.code, message: err.message }).toEqual({
-      code: "unauthorized_client",
-      message: `unauthorized_client: ${description}`,
-    });
+    expect(shown(err)).toEqual({ code: "unauthorized_client", status: 403, message: `unauthorized_client: ${description}` });
   });
 });
 
@@ -157,21 +176,62 @@ describe("pollDeviceToken", () => {
     expect(clock.sleeps).toEqual([10000, 15000, 15000]);
   });
 
+  it("retries after a connection failure and after a 5xx, doubling the interval each time", async () => {
+    const clock = fakeClock();
+    const { fetchImpl, requests } = recordingFetch(
+      noAnswer(connectionFailure()),
+      text(503, "Service Unavailable", "text/plain"),
+      json(200, TOKENS),
+    );
+    expect(await pollDeviceToken(TENANT, DEVICE, { fetchImpl, ...clock })).toEqual(TOKENS);
+    expect(clock.sleeps).toEqual([10000, 20000]);
+    expect(requests).toEqual([POLL_REQUEST, POLL_REQUEST, POLL_REQUEST]);
+  });
+
+  it("keeps backing off through failures and timeouts until the deadline, then gives up with expired_token", async () => {
+    const clock = fakeClock();
+    const device = { ...DEVICE, expires_in: 30 };
+    // Polls at start, +10 s and +30 s (not yet past the deadline); at +70 s it is past.
+    const { fetchImpl, requests } = recordingFetch(
+      noAnswer(connectionFailure()),
+      noAnswer(timeout()),
+      json(502, { error: "bad_gateway" }),
+      json(200, TOKENS),
+    );
+    const err = await refused(pollDeviceToken(TENANT, device, { fetchImpl, ...clock }));
+    expect(shown(err)).toEqual({ code: "expired_token", status: 0, message: "expired_token" });
+    expect(clock.sleeps).toEqual([10000, 20000, 40000]);
+    expect(requests).toHaveLength(3);
+  });
+
   it("stops at access_denied with DeviceFlowError(access_denied), carrying Auth0's description", async () => {
     const clock = fakeClock();
     const description = "User cancelled the confirmation prompt or consent page; the code is no longer valid.";
     const { fetchImpl, requests } = recordingFetch(json(403, { error: "access_denied", error_description: description }));
     const err = await refused(pollDeviceToken(TENANT, DEVICE, { fetchImpl, ...clock }));
-    expect({ code: err.code, message: err.message }).toEqual({ code: "access_denied", message: `access_denied: ${description}` });
+    expect(shown(err)).toEqual({ code: "access_denied", status: 403, message: `access_denied: ${description}` });
     expect(requests).toHaveLength(1);
     expect(clock.sleeps).toEqual([]);
   });
 
-  it.each(["expired_token", "invalid_grant", "unauthorized_client"])("stops at %s, with the code alone when Auth0 gives no description", async (error) => {
+  it.each([
+    [403, "expired_token"],
+    [403, "invalid_grant"],
+    [403, "unauthorized_client"],
+    [429, "too_many_requests"],
+  ])("stops at a %i %s, with the code alone when Auth0 gives no description", async (status, error) => {
     const clock = fakeClock();
-    const { fetchImpl, requests } = recordingFetch(json(403, { error }));
+    const { fetchImpl, requests } = recordingFetch(json(status, { error }));
     const err = await refused(pollDeviceToken(TENANT, DEVICE, { fetchImpl, ...clock }));
-    expect({ code: err.code, message: err.message }).toEqual({ code: error, message: error });
+    expect(shown(err)).toEqual({ code: error, status, message: error });
+    expect(requests).toHaveLength(1);
+  });
+
+  it("stops at a 4xx whose body is not JSON, naming it by its HTTP status", async () => {
+    const clock = fakeClock();
+    const { fetchImpl, requests } = recordingFetch(text(403, "<html><body>Forbidden</body></html>", "text/html"));
+    const err = await refused(pollDeviceToken(TENANT, DEVICE, { fetchImpl, ...clock }));
+    expect(shown(err)).toEqual({ code: "http_403", status: 403, message: "http_403" });
     expect(requests).toHaveLength(1);
   });
 
@@ -182,16 +242,9 @@ describe("pollDeviceToken", () => {
     // success still queued is never asked for.
     const { fetchImpl, requests } = recordingFetch(json(403, PENDING), json(403, PENDING), json(403, PENDING), json(200, TOKENS));
     const err = await refused(pollDeviceToken(TENANT, device, { fetchImpl, ...clock }));
-    expect({ code: err.code, message: err.message }).toEqual({ code: "expired_token", message: "expired_token" });
+    expect(shown(err)).toEqual({ code: "expired_token", status: 0, message: "expired_token" });
     expect(requests).toHaveLength(3);
     expect(clock.sleeps).toEqual([5000, 5000, 5000]);
-  });
-
-  it("names a refusal whose body is not JSON by its HTTP status", async () => {
-    const clock = fakeClock();
-    const { fetchImpl } = recordingFetch(text(502, "<html><body>Bad Gateway</body></html>", "text/html"));
-    const err = await refused(pollDeviceToken(TENANT, DEVICE, { fetchImpl, ...clock }));
-    expect({ code: err.code, message: err.message }).toEqual({ code: "http_502", message: "http_502" });
   });
 });
 
@@ -205,23 +258,30 @@ describe("refreshAccessToken", () => {
         url: TOKEN_URL,
         headers: FORM_HEADERS,
         form: { grant_type: "refresh_token", client_id: "client-123", refresh_token: "rt-secret-1" },
+        redirect: "error",
+        signal: expect.any(AbortSignal),
       },
     ]);
   });
 
-  it("throws invalid_grant with Auth0's description and nothing of the refresh token", async () => {
+  it("throws invalid_grant with its status and Auth0's description, nothing of the refresh token", async () => {
     const { fetchImpl } = recordingFetch(json(403, { error: "invalid_grant", error_description: "Unknown or invalid refresh token." }));
     const err = await refused(refreshAccessToken(TENANT, "rt-secret-1", fetchImpl));
-    expect({ code: err.code, message: err.message }).toEqual({
-      code: "invalid_grant",
-      message: "invalid_grant: Unknown or invalid refresh token.",
-    });
+    expect(shown(err)).toEqual({ code: "invalid_grant", status: 403, message: "invalid_grant: Unknown or invalid refresh token." });
   });
 
-  it("lets a request that never reached the tenant reject with fetch's own error, not a DeviceFlowError", async () => {
-    const offline = new TypeError("fetch failed");
-    const { fetchImpl } = recordingFetch(() => Promise.reject(offline));
-    await expect(refreshAccessToken(TENANT, "rt-secret-1", fetchImpl)).rejects.toBe(offline);
+  it("names an answer whose body is not JSON by its HTTP status", async () => {
+    const { fetchImpl } = recordingFetch(text(502, "<html><body>Bad Gateway</body></html>", "text/html"));
+    const err = await refused(refreshAccessToken(TENANT, "rt-secret-1", fetchImpl));
+    expect(shown(err)).toEqual({ code: "http_502", status: 502, message: "http_502" });
+  });
+
+  it.each([
+    ["a connection failure", connectionFailure()],
+    ["a timeout", timeout()],
+  ])("lets %s reject with fetch's own error, not a DeviceFlowError", async (_kind, error) => {
+    const { fetchImpl } = recordingFetch(noAnswer(error));
+    await expect(refreshAccessToken(TENANT, "rt-secret-1", fetchImpl)).rejects.toBe(error);
   });
 });
 
@@ -236,12 +296,28 @@ describe("a success answer that is not what the grant returns", () => {
   it.each(calls)("%s refuses a truncated body as invalid_response without quoting it", async (_name, call) => {
     const { fetchImpl } = recordingFetch(text(200, '{"access_token":"at-secret-1","device_code":"dc-secret-4f1a",', "application/json"));
     const err = await refused(call(fetchImpl));
-    expect({ code: err.code, message: err.message }).toEqual({ code: "invalid_response", message: "invalid_response" });
+    expect(shown(err)).toEqual({ code: "invalid_response", status: 200, message: "invalid_response" });
   });
 
   it.each(calls)("%s refuses a JSON body missing the fields it needs as invalid_response", async (_name, call) => {
     const { fetchImpl } = recordingFetch(json(200, { token_type: "Bearer", scope: "openid" }));
     const err = await refused(call(fetchImpl));
-    expect({ code: err.code, message: err.message }).toEqual({ code: "invalid_response", message: "invalid_response" });
+    expect(shown(err)).toEqual({ code: "invalid_response", status: 200, message: "invalid_response" });
   });
+});
+
+it("sends every request to the tenant with redirects refused and a 30 s timeout", async () => {
+  const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+  try {
+    const { fetchImpl, requests } = recordingFetch(json(200, DEVICE), json(200, TOKENS), json(200, TOKENS));
+    await requestDeviceCode(TENANT, fetchImpl);
+    await pollDeviceToken(TENANT, DEVICE, { fetchImpl, ...fakeClock() });
+    await refreshAccessToken(TENANT, "rt-secret-1", fetchImpl);
+    expect(timeoutSpy.mock.calls).toEqual([[30_000], [30_000], [30_000]]);
+    expect(requests.map((r) => r.redirect)).toEqual(["error", "error", "error"]);
+    // Each request carries the very signal AbortSignal.timeout(30_000) made for it.
+    for (const [i, request] of requests.entries()) expect(request.signal).toBe(timeoutSpy.mock.results[i].value);
+  } finally {
+    timeoutSpy.mockRestore();
+  }
 });

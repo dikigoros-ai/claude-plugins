@@ -28,7 +28,8 @@ export function openBrowser(url: string, spawnImpl: SpawnLike = spawn, platform:
         ? ["cmd", ["/c", "start", "", url]]
         : ["xdg-open", [url]];
   try {
-    const child = spawnImpl(command, args, { detached: true, stdio: "ignore" });
+    // windowsHide: no console window for the detached cmd.exe on Windows (ignored elsewhere)
+    const child = spawnImpl(command, args, { detached: true, stdio: "ignore", windowsHide: true });
     child.on("error", () => {}); // e.g. no xdg-open on this machine: spawn reports ENOENT here
     child.unref();
   } catch {

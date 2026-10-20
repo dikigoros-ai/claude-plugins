@@ -66,8 +66,10 @@ export class AuthSession {
 
   /**
    * The access token held in memory while more than 60 s of it remain, else a new one from the
-   * refresh token. null when no refresh token is held, or when the tenant refuses it (the stored
-   * token is then deleted). Rejects, keeping the refresh token, when the tenant cannot be reached.
+   * refresh token. null when no refresh token is held, or when Auth0 refuses the grant (the stored
+   * token is then deleted). Rejects on a transient failure (no answer, a timeout, a 5xx, a 429, a
+   * success it cannot use), keeping the refresh token and the session as they were: an outage
+   * never signs the lawyer out.
    */
   async getAccessToken(): Promise<string | null> {
     const access = this.#access;
@@ -102,7 +104,8 @@ export class AuthSession {
   async forgetSession(): Promise<void> {
     const store = await this.#deps.store();
     this.#epoch += 1;
-    await this.#discard(store);
+    const deleteFailure = await this.#discard(store);
+    if (deleteFailure !== null) this.#deps.log(`Removing the sign-in from the OS keychain failed (${deleteFailure}).`);
   }
 
   async #refresh(): Promise<string | null> {
@@ -117,9 +120,13 @@ export class AuthSession {
     try {
       tokens = await refreshAccessToken(this.#deps.config, refreshToken, this.#deps.fetchImpl);
     } catch (err) {
-      if (!(err instanceof DeviceFlowError)) throw err; // the tenant was not reached: the token stays
-      await this.#discard(store);
-      this.#deps.log(`The stored sign-in was refused (${reason(err)}) and has been removed.`);
+      if (!refusedByAuth0(err)) throw err; // an outage: the refresh token and the session stay
+      const deleteFailure = await this.#discard(store);
+      this.#deps.log(
+        deleteFailure === null
+          ? `The stored sign-in was refused (${reason(err)}) and has been removed.`
+          : `The stored sign-in was refused (${reason(err)}); removing it from the OS keychain failed (${deleteFailure}).`,
+      );
       return null;
     }
     if (epoch !== this.#epoch) return null;
@@ -177,15 +184,16 @@ export class AuthSession {
     }
   }
 
-  /** Forgets every token, in memory and in the store; a store that fails to delete is logged, not thrown. */
-  async #discard(store: TokenStore): Promise<void> {
+  /** Forgets every token, in memory and in the store. Answers why the store's delete failed, or null. */
+  async #discard(store: TokenStore): Promise<string | null> {
     this.#access = null;
     this.#signedIn = false;
     this.#unsavedRefreshToken = null;
     try {
       await store.delete(this.#account);
+      return null;
     } catch (err) {
-      this.#deps.log(`Removing the sign-in from the OS keychain failed (${reason(err)}).`);
+      return reason(err);
     }
   }
 
@@ -193,6 +201,23 @@ export class AuthSession {
   get #account(): string {
     return this.#deps.config.baseUrl;
   }
+}
+
+/**
+ * Whether Auth0 refused the grant itself: a 4xx answer carrying an OAuth error other than the rate
+ * limit's. Anything else is an outage, after which the same refresh token may still work: no answer,
+ * a timeout, a 5xx, a 429, a 4xx with no OAuth error (device-flow names those http_<status>), or a
+ * success answer it cannot use.
+ */
+function refusedByAuth0(err: unknown): boolean {
+  return (
+    err instanceof DeviceFlowError &&
+    err.status >= 400 &&
+    err.status < 500 &&
+    err.status !== 429 &&
+    err.code !== "too_many_requests" &&
+    err.code !== `http_${err.status}`
+  );
 }
 
 /** An error's message, first line only; never a stack, never a value thrown in place of an Error. */

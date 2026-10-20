@@ -1,7 +1,7 @@
 import { inspect } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import type { HelperConfig } from "../config";
-import type { FetchLike } from "./device-flow";
+import { DeviceFlowError, type FetchLike } from "./device-flow";
 import { AuthSession } from "./session";
 import { type KeyringBinding, KeyringTokenStore, MemoryTokenStore, type TokenStore } from "./token-store";
 
@@ -37,6 +37,25 @@ type Answer = () => Promise<Response>;
 
 function json(status: number, body: unknown): Answer {
   return async () => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function text(status: number, body: string, contentType: string): Answer {
+  return async () => new Response(body, { status, headers: { "Content-Type": contentType } });
+}
+
+/** No answer at all: the connection failed, or the request timed out. */
+function noAnswer(error: Error): Answer {
+  return () => Promise.reject(error);
+}
+
+/** What `promise` rejects with; fails the test when it resolves. */
+function rejection(promise: Promise<unknown>): Promise<unknown> {
+  return promise.then(
+    () => {
+      throw new Error("expected a rejection, the call succeeded");
+    },
+    (reason: unknown) => reason,
+  );
 }
 
 const deviceCode = json(200, {
@@ -303,14 +322,48 @@ describe("getAccessToken", () => {
     expect(requests).toHaveLength(1);
   });
 
-  it("rejects with fetch's error and keeps the stored token when the tenant cannot be reached", async () => {
-    const store = await storeHolding("rt-secret-1");
+  describe("rejects on a transient failure, keeping the stored token and the session as they were", () => {
+    /** The failure is a DeviceFlowError with this code and status. */
+    const refusedWith = (code: string, status: number) => (err: unknown) => {
+      expect(err).toBeInstanceOf(DeviceFlowError);
+      const { name, code: gotCode, status: gotStatus } = err as DeviceFlowError;
+      expect({ name, code: gotCode, status: gotStatus }).toEqual({ name: "DeviceFlowError", code, status });
+    };
+    /** The failure is fetch's own error, passed through. */
+    const passedThrough = (error: Error) => (err: unknown) => expect(err).toBe(error);
     const offline = new TypeError("fetch failed");
-    const { session, logs } = setup({ answers: [() => Promise.reject(offline), tokens(1)], store });
-    await expect(session.getAccessToken()).rejects.toBe(offline);
-    expect(await store.get(ACCOUNT)).toBe("rt-secret-1");
-    expect(logs).toEqual([]);
-    expect(await session.getAccessToken()).toBe("at-secret-1"); // the next call tries again
+    const timedOut = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+
+    it.each([
+      ["a connection failure", noAnswer(offline), passedThrough(offline)],
+      ["a timeout", noAnswer(timedOut), passedThrough(timedOut)],
+      [
+        "a 503",
+        json(503, { error: "temporarily_unavailable", error_description: "The service is temporarily unavailable." }),
+        refusedWith("temporarily_unavailable", 503),
+      ],
+      ["a 502 without a body", text(502, "", "text/plain"), refusedWith("http_502", 502)],
+      [
+        "a 429",
+        json(429, { error: "too_many_requests", error_description: "Global limit has been reached" }),
+        refusedWith("too_many_requests", 429),
+      ],
+      ["a 429 carrying another error", json(429, { error: "rate_limited" }), refusedWith("rate_limited", 429)],
+      ["too_many_requests on another 4xx", json(400, { error: "too_many_requests" }), refusedWith("too_many_requests", 400)],
+      ["a 4xx without an OAuth error", text(403, "<html><body>Forbidden</body></html>", "text/html"), refusedWith("http_403", 403)],
+      ["a 2xx body it cannot use", text(200, '{"access_token":"at-secret-9",', "application/json"), refusedWith("invalid_response", 200)],
+    ])("%s", async (_kind, failure, expectFailure) => {
+      const store = await storeHolding("rt-secret-1");
+      const { session, requests, logs, advance } = setup({ answers: [tokens(1), failure, tokens(2)], store });
+      expect(await session.getAccessToken()).toBe("at-secret-1");
+      advance(3_600_000);
+      expectFailure(await rejection(session.getAccessToken()));
+      expect(session.status()).toBe("signed_in");
+      expect(await store.get(ACCOUNT)).toBe("rt-secret-1");
+      expect(logs).toEqual([]);
+      expect(await session.getAccessToken()).toBe("at-secret-2"); // the next call tries again, with the same token
+      expect(requests.map((r) => r.form.refresh_token)).toEqual(["rt-secret-1", "rt-secret-1", "rt-secret-1"]);
+    });
   });
 });
 
@@ -343,11 +396,25 @@ describe("a keychain that refuses the write", () => {
     expect(session.status()).toBe("signed_out");
     expect(logs).toEqual([
       "Saving the sign-in to the OS keychain failed (Platform secure storage failure: User interaction is not allowed.); it is kept in memory for this session only.",
-      "Removing the sign-in from the OS keychain failed (Platform secure storage failure: User interaction is not allowed.).",
-      "The stored sign-in was refused (invalid_grant: Unknown or invalid refresh token.) and has been removed.",
+      "The stored sign-in was refused (invalid_grant: Unknown or invalid refresh token.); removing it from the OS keychain failed (Platform secure storage failure: User interaction is not allowed.).",
     ]);
     expect(await session.getAccessToken()).toBeNull(); // the refused token is gone from memory too
     expect(requests).toHaveLength(3);
+  });
+
+  it("keeps the refresh token held in memory through a transient failure", async () => {
+    const { session, requests, logs, advance } = setup({
+      answers: [deviceCode, tokens(1, "rt-secret-1"), json(503, { error: "temporarily_unavailable" }), tokens(2)],
+      store: lockedKeychain(),
+    });
+    await session.beginSignIn();
+    await vi.waitFor(() => expect(session.status()).toBe("signed_in"));
+    advance(3_600_000);
+    await expect(session.getAccessToken()).rejects.toThrow("temporarily_unavailable");
+    expect(session.status()).toBe("signed_in");
+    expect(await session.getAccessToken()).toBe("at-secret-2");
+    expect(requests.slice(-2).map((r) => r.form.refresh_token)).toEqual(["rt-secret-1", "rt-secret-1"]);
+    expect(logs).toHaveLength(1); // the keychain write, nothing more
   });
 
   it("never puts a value thrown in place of an Error into the log line", async () => {
@@ -374,6 +441,20 @@ describe("forgetSession", () => {
     expect(await store.get(ACCOUNT)).toBeNull();
     expect(await session.getAccessToken()).toBeNull();
     expect(requests).toHaveLength(1);
+  });
+
+  it("logs one line when the keychain refuses the delete, and still signs out of memory", async () => {
+    const store: TokenStore = {
+      kind: "keyring",
+      get: async () => "rt-secret-1",
+      set: async () => {},
+      delete: () => Promise.reject(new Error("Platform secure storage failure: User interaction is not allowed.\n    at Entry.deletePassword")),
+    };
+    const { session, logs } = setup({ answers: [tokens(1)], store });
+    expect(await session.getAccessToken()).toBe("at-secret-1");
+    await session.forgetSession();
+    expect(session.status()).toBe("signed_out");
+    expect(logs).toEqual(["Removing the sign-in from the OS keychain failed (Platform secure storage failure: User interaction is not allowed.)."]);
   });
 
   it("discards a refresh that was in flight when the session was forgotten", async () => {
@@ -407,7 +488,7 @@ it("keeps every token and code out of its log lines and out of util.inspect", as
   expect(await session.getAccessToken()).toBeNull(); // the refresh token held in memory is refused
   await session.beginSignIn();
   await vi.waitFor(() => expect(session.status()).toBe("signed_out"));
-  expect(logs).toHaveLength(4); // keychain write, keychain delete, refused refresh, refused sign-in
+  expect(logs).toHaveLength(3); // keychain write, refused refresh (its delete refused too), refused sign-in
   for (const shown of [...logs, inspected]) {
     for (const secret of SECRETS) expect(shown).not.toContain(secret);
   }

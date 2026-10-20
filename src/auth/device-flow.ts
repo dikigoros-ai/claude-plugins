@@ -24,13 +24,17 @@ export interface TokenResponse {
 
 /**
  * A grant the tenant refused or could not complete. `code` is Auth0's `error`, `http_<status>` for
- * a refusal without one, `invalid_response` for a success answer the grant cannot use, or
- * `expired_token` when the device code ran out before the lawyer approved it.
+ * an answer without one, `invalid_response` for a success answer the grant cannot use, or
+ * `expired_token` when the device code ran out before the lawyer approved it. `status` is the
+ * answer's HTTP status, 0 when there was no answer.
  */
 export class DeviceFlowError extends Error {
+  override name = "DeviceFlowError";
+
   constructor(
     public code: string,
     message: string,
+    public status = 0,
   ) {
     super(message);
   }
@@ -45,6 +49,9 @@ const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 /** RFC 8628 §3.5: each slow_down adds five seconds to the interval, for every later poll. */
 const SLOW_DOWN_SECONDS = 5;
 
+/** How long a request to the tenant may take before fetch abandons it with a TimeoutError. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 /** Starts a sign-in: the device code the poll uses, and the user code and URL for the lawyer. */
 export async function requestDeviceCode(
   cfg: Pick<HelperConfig, "auth0Domain" | "auth0ClientId" | "scopes" | "audience">,
@@ -57,14 +64,16 @@ export async function requestDeviceCode(
     fetchImpl,
   );
   if (!answer.ok) throw refusal(answer);
-  if (!isDeviceCodeResponse(answer.body)) throw invalidResponse();
+  if (!isDeviceCodeResponse(answer.body)) throw invalidResponse(answer.status);
   return answer.body;
 }
 
 /**
  * Polls the token endpoint until the lawyer approves the device code: at once, then `interval`
- * seconds after each authorization_pending, five seconds more for good after each slow_down. Any
- * other refusal ends the poll, and so does `now()` passing the device code's expiry.
+ * seconds after each authorization_pending, five seconds more for good after each slow_down. A
+ * poll that gets no answer (a connection failure, a timeout) or a 5xx doubles the interval for good
+ * and is retried after it. Any other refusal ends the poll, and so does `now()` passing the device
+ * code's expiry.
  */
 export async function pollDeviceToken(
   cfg: Tenant,
@@ -80,11 +89,15 @@ export async function pollDeviceToken(
       "/oauth/token",
       { grant_type: DEVICE_CODE_GRANT, device_code: device.device_code, client_id: cfg.auth0ClientId },
       deps.fetchImpl,
-    );
-    if (answer.ok) return tokenResponse(answer.body);
-    const err = refusal(answer);
-    if (err.code === "slow_down") interval += SLOW_DOWN_SECONDS;
-    else if (err.code !== "authorization_pending") throw err;
+    ).catch(() => null); // no answer: fetch's error says nothing the retry needs
+    if (answer?.ok) return tokenResponse(answer);
+    if (answer === null || answer.status >= 500) {
+      interval *= 2; // RFC 8628 §3.5: poll less often before retrying an outage
+    } else {
+      const err = refusal(answer);
+      if (err.code === "slow_down") interval += SLOW_DOWN_SECONDS;
+      else if (err.code !== "authorization_pending") throw err;
+    }
     await deps.sleep(interval * 1000);
   }
 }
@@ -98,7 +111,7 @@ export async function refreshAccessToken(cfg: Tenant, refreshToken: string, fetc
     fetchImpl,
   );
   if (!answer.ok) throw refusal(answer);
-  return tokenResponse(answer.body);
+  return tokenResponse(answer);
 }
 
 interface Answer {
@@ -108,7 +121,11 @@ interface Answer {
   body: unknown;
 }
 
-/** POSTs `form` form-encoded to the tenant. A request that never reaches it rejects with fetch's own error. */
+/**
+ * POSTs `form` form-encoded to the tenant, refusing redirects (the form can carry a refresh token)
+ * and giving up after REQUEST_TIMEOUT_MS. A request that gets no answer rejects with fetch's own
+ * error, a TimeoutError on the timeout.
+ */
 async function postForm(
   cfg: Pick<HelperConfig, "auth0Domain">,
   path: string,
@@ -119,6 +136,8 @@ async function postForm(
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(form).toString(),
+    redirect: "error",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   return { ok: res.ok, status: res.status, body: await jsonBody(res) };
 }
@@ -132,20 +151,20 @@ async function jsonBody(res: Response): Promise<unknown> {
   }
 }
 
-/** The DeviceFlowError for a refusal: Auth0's error code (else http_<status>) and its description. */
+/** The DeviceFlowError for an error answer: Auth0's error code (else http_<status>), its description, the status. */
 function refusal({ status, body }: Answer): DeviceFlowError {
   const fields = isRecord(body) ? body : {};
   const code = typeof fields.error === "string" ? fields.error : `http_${status}`;
   const description = typeof fields.error_description === "string" ? fields.error_description : "";
-  return new DeviceFlowError(code, description === "" ? code : `${code}: ${description}`);
+  return new DeviceFlowError(code, description === "" ? code : `${code}: ${description}`, status);
 }
 
-function invalidResponse(): DeviceFlowError {
-  return new DeviceFlowError("invalid_response", "invalid_response");
+function invalidResponse(status: number): DeviceFlowError {
+  return new DeviceFlowError("invalid_response", "invalid_response", status);
 }
 
-function tokenResponse(body: unknown): TokenResponse {
-  if (!isTokenResponse(body)) throw invalidResponse();
+function tokenResponse({ status, body }: Answer): TokenResponse {
+  if (!isTokenResponse(body)) throw invalidResponse(status);
   return body;
 }
 

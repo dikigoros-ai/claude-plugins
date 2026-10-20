@@ -160,9 +160,10 @@ function helperFor(baseUrl: string): ToolDeps {
     session: SESSION,
     api,
     resolvePlan: resolveUploadPlan,
-    upload: (entry, ctx) => uploadDocument(entry, ctx, pipeline),
+    upload: (entry, ctx, onProgress) => uploadDocument(entry, ctx, { ...pipeline, onProgress }),
     nativeRuntime: async () => ({ nodeModulesDir: join(ROOT, "node_modules") }),
     tokenStoreWarning: async () => null,
+    now: Date.now,
   };
 }
 

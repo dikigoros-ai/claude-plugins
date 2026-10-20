@@ -15,6 +15,8 @@ import type { HelperConfig } from "../config";
 import type { PlanEntry, UploadPlan } from "../files/resolve";
 import type { DocumentOutcome, UploadContext } from "../pipeline/upload-document";
 import {
+  CALL_BUDGET_MS,
+  type CallContext,
   type CreateMatterArgs,
   handleCreateMatter,
   handleUploadToMatter,
@@ -263,6 +265,8 @@ function fakes(setup: Setup = {}) {
   const upload = vi.fn<ToolDeps["upload"]>(async (entry) => step(`upload(${entry.name})`, OUTCOMES[entry.name]));
   const nodeModules = { nodeModulesDir: "/Users/eleni/.dikigoros/helper/native/0f3c8a1b2d4e/node_modules" };
   const nativeRuntime = vi.fn<ToolDeps["nativeRuntime"]>(async () => step("nativeRuntime", setup.runtime ?? nodeModules));
+  /** The time the handler reads: it stands still unless a test moves it. */
+  const clock = { now: 1_760_870_400_000 };
   const deps: ToolDeps = {
     config: { ...CONFIG, ...setup.config },
     session,
@@ -271,8 +275,27 @@ function fakes(setup: Setup = {}) {
     upload,
     nativeRuntime,
     tokenStoreWarning: async () => setup.warning ?? null,
+    now: () => clock.now,
   };
-  return { deps, calls, session, api, resolvePlan, upload, nativeRuntime };
+  return { deps, calls, session, api, resolvePlan, upload, nativeRuntime, clock };
+}
+
+/**
+ * The part of the SDK's request context the handler reads: a signal, aborted when `aborted`, the
+ * request's `_meta` with `progressToken` when one is given, and a notify that records what it sends.
+ */
+function requestContext({ aborted = false, progressToken }: { aborted?: boolean; progressToken?: string | number } = {}) {
+  const controller = new AbortController();
+  if (aborted) controller.abort();
+  const notify = vi.fn<CallContext["mcpReq"]["notify"]>(async () => {});
+  const ctx: CallContext = {
+    mcpReq: {
+      signal: controller.signal,
+      _meta: progressToken === undefined ? undefined : { progressToken },
+      notify,
+    },
+  };
+  return { ctx, notify, controller };
 }
 
 /** The handler's result, checked on its way out for the session's access token. */
@@ -538,7 +561,7 @@ describe("upload_to_matter: the confirmed call", () => {
       "upload(υπεράσπιση.docx)",
       "upload(σημείωμα.txt)",
     ]);
-    expect(f.upload.mock.calls).toEqual([
+    expect(f.upload.mock.calls.map(([entry, ctx]) => [entry, ctx])).toEqual([
       [CLAIM, CTX],
       [DEFENCE, CTX],
       [NOTE, CTX],
@@ -707,6 +730,94 @@ describe("upload_to_matter: the native runtime", () => {
   });
 });
 
+describe("upload_to_matter: a long call", () => {
+  const CONFIRMED: UploadToMatterArgs = { matter_id: 7, paths: PATHS, confirm: true, plan_digest: PLAN.digest };
+  const CANCELLED = "not started: the call was cancelled";
+  const OVER_BUDGET =
+    "not started: this call ran over 20 minutes; call again — files already uploaded are picked up as duplicates or resumed";
+
+  it("starts no file after the first once the call is cancelled: the others are skipped (cancelled)", async () => {
+    const f = fakes();
+    const { ctx } = requestContext({ aborted: true });
+    const result = await handleUploadToMatter(CONFIRMED, f.deps, ctx);
+
+    expect(f.upload.mock.calls.map(([entry]) => entry.name)).toEqual(["claim.pdf"]);
+    expect(textOf(result)).toBe(
+      [
+        "claim.pdf: ready",
+        `υπεράσπιση.docx: skipped — ${CANCELLED}`,
+        `σημείωμα.txt: skipped — ${CANCELLED}`,
+        "Matter #7: https://dikigoros.ai/matters/7",
+      ].join("\n"),
+    );
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        RESULTS[0],
+        { name: "υπεράσπιση.docx", status: "skipped", code: "cancelled", message: CANCELLED },
+        { name: "σημείωμα.txt", status: "skipped", code: "cancelled", message: CANCELLED },
+      ],
+    });
+  });
+
+  it(`starts no file once the call has run more than CALL_BUDGET_MS (${CALL_BUDGET_MS} ms): the others are skipped (call_budget)`, async () => {
+    const f = fakes();
+    f.upload.mockImplementation(async (entry) => {
+      // The first file takes the whole budget, which is not yet over; the second one more millisecond.
+      f.clock.now += entry.name === "claim.pdf" ? CALL_BUDGET_MS : 1;
+      return OUTCOMES[entry.name];
+    });
+    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
+
+    expect(f.upload.mock.calls.map(([entry]) => entry.name)).toEqual(["claim.pdf", "υπεράσπιση.docx"]);
+    expect(textOf(result).split("\n")[2]).toBe(`σημείωμα.txt: skipped — ${OVER_BUDGET}`);
+    expect(result.structuredContent).toMatchObject({
+      results: [RESULTS[0], RESULTS[1], { name: "σημείωμα.txt", status: "skipped", code: "call_budget", message: OVER_BUDGET }],
+    });
+  });
+
+  it("reports each file it starts and each OCR count as progress, when the request carries a progress token", async () => {
+    const f = fakes();
+    f.upload.mockImplementation(async (entry, _ctx, onProgress) => {
+      if (entry.name === "claim.pdf") {
+        onProgress?.("claim.pdf: OCR, 2 page(s) remaining");
+        onProgress?.("claim.pdf: finalizing");
+      }
+      return OUTCOMES[entry.name];
+    });
+    const { ctx, notify } = requestContext({ progressToken: "upload-7" });
+    const result = await handleUploadToMatter(CONFIRMED, f.deps, ctx);
+
+    expect(textOf(result)).toBe(DONE_TEXT);
+    expect(notify.mock.calls.map(([notification]) => notification)).toEqual(
+      [
+        "Uploading claim.pdf (1 of 3)",
+        "claim.pdf: OCR, 2 page(s) remaining",
+        "claim.pdf: finalizing",
+        "Uploading υπεράσπιση.docx (2 of 3)",
+        "Uploading σημείωμα.txt (3 of 3)",
+      ].map((message, i) => ({
+        method: "notifications/progress",
+        params: { progressToken: "upload-7", progress: i + 1, message },
+      })),
+    );
+  });
+
+  it("sends no progress without a progress token, and uploads all the same when a notification cannot be sent", async () => {
+    const quiet = fakes();
+    const { ctx: withoutToken, notify: unused } = requestContext();
+    await handleUploadToMatter(CONFIRMED, quiet.deps, withoutToken);
+    expect(unused).not.toHaveBeenCalled();
+    expect(quiet.upload.mock.calls.map(([, , onProgress]) => onProgress)).toEqual([undefined, undefined, undefined]);
+
+    const f = fakes();
+    const { ctx, notify } = requestContext({ progressToken: 7 });
+    notify.mockRejectedValue(new Error("Not connected"));
+    const result = await handleUploadToMatter(CONFIRMED, f.deps, ctx);
+    expect(notify).toHaveBeenCalledTimes(3);
+    expect(textOf(result)).toBe(DONE_TEXT);
+  });
+});
+
 describe("create_matter", () => {
   it("opens the matter, type as matterType and case_reference as caseReference", async () => {
     const f = fakes();
@@ -810,18 +921,18 @@ describe("registerTools", () => {
 
   interface Registered {
     config: { title: string; description: string; inputSchema: z.ZodType; annotations: Record<string, boolean> };
-    callback: (args: unknown) => Promise<CallToolResult>;
+    callback: (args: unknown, ctx?: CallContext) => Promise<CallToolResult>;
   }
 
-  /** The tools registerTools puts on a stand-in server, answering with the fakes' deps. */
-  function registered(): Map<string, Registered> {
+  /** The tools registerTools puts on a stand-in server, answering with `deps`. */
+  function registered(deps: ToolDeps = fakes().deps): Map<string, Registered> {
     const tools = new Map<string, Registered>();
     const server = {
       registerTool(name: string, config: Registered["config"], callback: Registered["callback"]) {
         tools.set(name, { config, callback });
       },
     };
-    registerTools(server as unknown as McpServer, fakes().deps);
+    registerTools(server as unknown as McpServer, deps);
     return tools;
   }
 
@@ -853,6 +964,18 @@ describe("registerTools", () => {
 
     expect(textOf(listing)).toBe(LISTING);
     expect(textOf(created)).toBe('Created matter #9 "Κυριάκου v Δήμου Λευκωσίας" — https://dikigoros.ai/matters/9');
+  });
+
+  it("hands upload_to_matter the request's context: its signal and its progress token", async () => {
+    const f = fakes();
+    const { ctx, notify } = requestContext({ aborted: true, progressToken: "p" });
+    const args = { matter_id: 7, paths: PATHS, confirm: true, plan_digest: PLAN.digest };
+    await registered(f.deps).get("upload_to_matter")!.callback(args, ctx);
+
+    expect(f.upload).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls).toEqual([
+      [{ method: "notifications/progress", params: { progressToken: "p", progress: 1, message: "Uploading claim.pdf (1 of 3)" } }],
+    ]);
   });
 
   it("takes for upload_to_matter a matter id and 1 to 50 paths, with an optional role, side, confirm and digest", () => {

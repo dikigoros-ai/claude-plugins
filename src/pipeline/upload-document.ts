@@ -47,6 +47,8 @@ export interface UploadDeps {
   maxWaitMs?: number;
   /** A line of progress, or of a refusal the upload went on after. */
   log: (line: string) => void;
+  /** The lines of OCR progress again, for the call's progress notifications, when its client asked for them. */
+  onProgress?: (message: string) => void;
 }
 
 export type OutcomeStatus = "ready" | "processing" | "failed" | "duplicate" | "skipped";
@@ -278,7 +280,8 @@ class DocumentUpload {
    * processing, the row still resumable.
    */
   async #poll(docId: number, known: { pageCount?: number; ocrPages?: number }): Promise<DocumentOutcome> {
-    const { api, sleep, now, log, pollIntervalMs = POLL_INTERVAL_MS, maxWaitMs = DEFAULT_MAX_WAIT_MS } = this.#deps;
+    const { api, sleep, now, log, onProgress } = this.#deps;
+    const { pollIntervalMs = POLL_INTERVAL_MS, maxWaitMs = DEFAULT_MAX_WAIT_MS } = this.#deps;
     const path = `${this.#documents}/${docId}/process`;
     const start = now();
     let ocrRemaining = known.ocrPages;
@@ -302,7 +305,9 @@ class DocumentUpload {
         ocrRemaining = result.ocrRemaining;
         // A line when the count changes, not one per poll.
         if (ocrRemaining !== logged) {
-          log(ocrRemaining > 0 ? `${this.#name}: OCR, ${ocrRemaining} page(s) remaining` : `${this.#name}: finalizing`);
+          const line = ocrRemaining > 0 ? `${this.#name}: OCR, ${ocrRemaining} page(s) remaining` : `${this.#name}: finalizing`;
+          log(line);
+          onProgress?.(line);
         }
         logged = ocrRemaining;
       }

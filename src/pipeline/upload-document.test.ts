@@ -495,17 +495,16 @@ describe("uploadDocument: the poll", () => {
     expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
   });
 
-  it("logs the OCR count only when it changes, and finalizing once it is 0", async () => {
+  it("logs the OCR count only when it changes, and finalizing once it is 0, and reports the same as progress", async () => {
     const f = fakes({
       ingest: [{ ocrPages: 3 }],
       process: [processing(3), processing(3), processing(1), processing(0), processing(0), ready(2)],
     });
-    await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
-    expect(f.log.mock.calls).toEqual([
-      ["claim.pdf: OCR, 3 page(s) remaining"],
-      ["claim.pdf: OCR, 1 page(s) remaining"],
-      ["claim.pdf: finalizing"],
-    ]);
+    const onProgress = vi.fn<(message: string) => void>();
+    await uploadDocument(planned("claim.pdf", "pdf"), CTX, { ...f.deps, onProgress });
+    const lines = [["claim.pdf: OCR, 3 page(s) remaining"], ["claim.pdf: OCR, 1 page(s) remaining"], ["claim.pdf: finalizing"]];
+    expect(f.log.mock.calls).toEqual(lines);
+    expect(onProgress.mock.calls).toEqual(lines);
   });
 
   it.each([

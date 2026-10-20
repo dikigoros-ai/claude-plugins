@@ -5,7 +5,7 @@
 // sentence (../api/errors), and no answer at all with a sentence saying what was not done. No result
 // carries a token, the device code, an error's metadata or a file's bytes.
 
-import type { CallToolResult, McpServer } from "@modelcontextprotocol/server";
+import type { CallToolResult, McpServer, ServerContext } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import type { CurrentUser, DikigorosApi, Matter } from "../api/client";
 import { ApiError, describeApiError } from "../api/errors";
@@ -53,13 +53,41 @@ export interface ToolDeps {
   session: SessionLike;
   api: DikigorosApi;
   resolvePlan: typeof resolveUploadPlan;
-  /** One planned file into the matter, followed to its outcome (../pipeline/upload-document). */
-  upload: (entry: PlanEntry, ctx: UploadContext) => Promise<DocumentOutcome>;
+  /**
+   * One planned file into the matter, followed to its outcome (../pipeline/upload-document);
+   * `onProgress`, when given, takes the pipeline's lines of OCR progress.
+   */
+  upload: (entry: PlanEntry, ctx: UploadContext, onProgress?: (message: string) => void) => Promise<DocumentOutcome>;
   /** The native runtime the PDF extraction needs, installed on first use; rejects when it cannot be. */
   nativeRuntime: () => Promise<unknown>;
   /** Why the sign-in is kept in memory only, when the OS keychain is not available; else null. */
   tokenStoreWarning: () => Promise<string | null>;
+  /** The time, in milliseconds, that a call's budget is measured with. */
+  now: () => number;
 }
+
+/**
+ * The part of the SDK's request context a tool call reads: the signal the client's cancellation
+ * aborts, the request's `_meta` (its progress token), and the method that sends a notification
+ * about the request.
+ */
+export interface CallContext {
+  mcpReq: Pick<ServerContext["mcpReq"], "signal" | "_meta" | "notify">;
+}
+
+/**
+ * How long a confirmed call may run before it starts no more files: the files it has not started
+ * are left for the next call, which finds the ones uploaded since as duplicates or resumes them.
+ */
+export const CALL_BUDGET_MS = 20 * 60 * 1000;
+
+/** Why a planned file was not started: the call was cancelled, or ran past CALL_BUDGET_MS. */
+const CANCELLED = { code: "cancelled", message: "not started: the call was cancelled" };
+const OVER_BUDGET = {
+  code: "call_budget",
+  message:
+    "not started: this call ran over 20 minutes; call again — files already uploaded are picked up as duplicates or resumed",
+};
 
 const uploadToMatterInput = z.object({
   matter_id: z.number().int().positive(),
@@ -109,7 +137,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       inputSchema: uploadToMatterInput,
       annotations: ANNOTATIONS,
     },
-    (args) => handleUploadToMatter(args, deps),
+    (args, ctx) => handleUploadToMatter(args, deps, ctx),
   );
   server.registerTool(
     "create_matter",
@@ -131,9 +159,15 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
  * there is said before any list. Unless the call carries `confirm: true` and the plan_digest of a
  * listing, it lists the plan for `paths` and uploads nothing; a plan_digest the files no longer match
  * lists them again. A confirmed call checks the matter's document limit, then uploads the planned
- * files one after another and reports each.
+ * files one after another and reports each. `request`, the SDK's context of the call, can cancel
+ * it between files and takes its progress notifications.
  */
-export async function handleUploadToMatter(args: UploadToMatterArgs, deps: ToolDeps): Promise<CallToolResult> {
+export async function handleUploadToMatter(
+  args: UploadToMatterArgs,
+  deps: ToolDeps,
+  request?: CallContext,
+): Promise<CallToolResult> {
+  const started = deps.now();
   const blocked = await signInGate(deps);
   if (blocked !== null) return blocked;
   const { config, session, api } = deps;
@@ -165,7 +199,7 @@ export async function handleUploadToMatter(args: UploadToMatterArgs, deps: ToolD
           "nothing can be added until some are removed on the matter page.",
       );
     }
-    return await uploadPlanned(args, uploads, me, deps);
+    return await uploadPlanned(args, uploads, me, deps, { request, started });
   } catch (err) {
     return failureAfterSignIn(err, config.baseUrl, "Nothing was uploaded; try again in a moment.");
   }
@@ -208,13 +242,15 @@ export async function handleCreateMatter(args: CreateMatterArgs, deps: ToolDeps)
 
 /**
  * What a confirmed call does with the files its plan uploads: the native runtime when a PDF is
- * among them, then the uploads one at a time.
+ * among them, then the uploads one at a time, each started with a line of progress. Between two
+ * files, a call that was cancelled or has run past CALL_BUDGET_MS starts no more of them.
  */
 async function uploadPlanned(
   args: UploadToMatterArgs,
   uploads: PlanEntry[],
   me: CurrentUser,
   deps: ToolDeps,
+  call: { request: CallContext | undefined; started: number },
 ): Promise<CallToolResult> {
   const { config } = deps;
   // Without the native runtime no PDF can be read; the other files do not need it.
@@ -228,15 +264,45 @@ async function uploadPlanned(
     role: args.role,
     side: args.side,
   };
+  const progress = progressOf(call.request);
   const outcomes: DocumentOutcome[] = [];
-  for (const entry of uploads) {
-    outcomes.push(
-      entry.kind === "pdf" && runtimeFailure !== null
-        ? { name: entry.name, status: "failed", code: "native_runtime_unavailable", message: runtimeFailure }
-        : await deps.upload(entry, ctx),
-    );
+  for (const [i, entry] of uploads.entries()) {
+    const stopped = i === 0 ? undefined : stopReason(call.request, deps.now() - call.started);
+    if (stopped !== undefined) {
+      outcomes.push({ name: entry.name, status: "skipped", ...stopped });
+    } else if (entry.kind === "pdf" && runtimeFailure !== null) {
+      outcomes.push({ name: entry.name, status: "failed", code: "native_runtime_unavailable", message: runtimeFailure });
+    } else {
+      progress?.(`Uploading ${entry.name} (${i + 1} of ${uploads.length})`);
+      outcomes.push(await deps.upload(entry, ctx, progress));
+    }
   }
   return report(args.matter_id, outcomes, deps);
+}
+
+/** Why the call starts no more files, `elapsed` milliseconds after it began; undefined when it goes on. */
+function stopReason(request: CallContext | undefined, elapsed: number): { code: string; message: string } | undefined {
+  if (request?.mcpReq.signal.aborted === true) return CANCELLED;
+  if (elapsed > CALL_BUDGET_MS) return OVER_BUDGET;
+  return undefined;
+}
+
+/**
+ * A line of progress sent as the call's notifications/progress, numbered from 1, when its request
+ * carries a progress token; undefined when it does not. A notification that cannot be sent is
+ * dropped: it never stops an upload.
+ */
+function progressOf(request: CallContext | undefined): ((message: string) => void) | undefined {
+  const progressToken = request?.mcpReq._meta?.progressToken;
+  if (request === undefined || progressToken === undefined) return undefined;
+  let progress = 0;
+  return (message) => {
+    progress += 1;
+    const notification = { method: "notifications/progress", params: { progressToken, progress, message } };
+    Promise.resolve()
+      .then(() => request.mcpReq.notify(notification))
+      .catch(() => {});
+  };
 }
 
 /**

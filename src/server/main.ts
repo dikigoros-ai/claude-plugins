@@ -135,9 +135,10 @@ function serve(): void {
     session,
     api,
     resolvePlan: resolveUploadPlan,
-    upload: (entry, ctx) => uploadDocument(entry, ctx, pipeline),
+    upload: (entry, ctx, onProgress) => uploadDocument(entry, ctx, { ...pipeline, onProgress }),
     nativeRuntime: runtime,
     tokenStoreWarning: async () => (await store()).warning,
+    now: Date.now,
   };
   const version = typeof PLUGIN_VERSION === "string" ? PLUGIN_VERSION : "dev";
   serveStdio(() => {

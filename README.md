@@ -108,8 +108,13 @@ Each file ends as one of:
 - `duplicate`: the same bytes are already in the matter.
 - `processing`: still being processed after 10 minutes; the matter page carries on with it, or call again later.
 - `skipped`: a `.txt` or `.md` file that is empty, longer than 200,000 characters, or neither UTF-8 nor Windows Greek
-  text.
+  text; or a file the call did not start, as the call was cancelled (`cancelled`) or had run for 20 minutes
+  (`call_budget`): call again, and the files uploaded meanwhile are found as duplicates or resumed.
 - `failed`, with the reason (its code, when there is no sentence for it).
+
+While the second call runs, the helper sends MCP progress notifications when the client asks for them: one as it
+starts each file, and one each time the count of pages waiting for OCR changes. A call the client cancels starts no
+further file.
 
 Each file goes the way the uploader on dikigoros.ai sends it. Its SHA-256 is computed on this computer. A PDF or a
 DOCX is put in the DIKIGOROS private blob store under the matter, with a client token dikigoros.ai issues for that
@@ -209,6 +214,7 @@ another project, they would send the files and their upload tokens somewhere oth
 - At most 50 MB per file, and 200,000 characters per `.txt` or `.md` file. Empty files are skipped.
 - At most 50 paths and 100 files per call. The files past the 100th are skipped (`too_many_files`) without being
   read, and a listing names at most 25 skipped files, counting the others by reason.
+- A call that has run for 20 minutes starts no further file; the next call picks up where it stopped.
 - Paths must be absolute: a relative path, or one starting with `~`, is skipped (`not_absolute`).
 - A folder stands for the files directly in it: subfolders are not entered.
 - Dotfiles are skipped: a folder's are left out of the listing, and one named directly is listed as skipped.

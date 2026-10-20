@@ -4,6 +4,7 @@
 // code and, when Auth0 sends one, its error_description, nothing else.
 
 import type { HelperConfig } from "../config";
+import { isRecord } from "../util";
 
 export interface DeviceCodeResponse {
   device_code: string;
@@ -166,10 +167,6 @@ function invalidResponse(status: number): DeviceFlowError {
 function tokenResponse({ status, body }: Answer): TokenResponse {
   if (!isTokenResponse(body)) throw invalidResponse(status);
   return body;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isDeviceCodeResponse(body: unknown): body is DeviceCodeResponse {

@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import * as tar from "tar";
 import type { FetchLike } from "../auth/device-flow";
+import { firstLine, isRecord } from "../util";
 import type { PlatformKey } from "./platform";
 
 export interface NativeLock {
@@ -56,10 +57,6 @@ export function readNativeLock(json: unknown): NativeLock {
     }
   }
   return json as unknown as NativeLock;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The install directory's name: the first 12 hex digits of the sha256 of the lock's JSON. */
@@ -133,10 +130,6 @@ async function download(name: string, url: string, fetchImpl: FetchLike, timeout
     clearTimeout(timer);
   }
   throw new Error(`Download failed for ${name}: ${response.status}`);
-}
-
-function firstLine(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0];
 }
 
 /** A tarball's integrity as npm records it: "sha512-" and the base64 of the digest. */

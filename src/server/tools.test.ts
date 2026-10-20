@@ -21,7 +21,6 @@ import {
   handleCreateMatter,
   handleUploadToMatter,
   registerTools,
-  type SessionLike,
   type ToolDeps,
   type UploadToMatterArgs,
 } from "./tools";
@@ -251,7 +250,6 @@ function fakes(setup: Setup = {}) {
     return unwrap(value);
   };
   const session = {
-    status: vi.fn<SessionLike["status"]>(() => "signed_in"),
     getAccessToken: vi.fn(async () => step("getAccessToken", setup.token === undefined ? TOKEN : setup.token)),
     beginSignIn: vi.fn(async () => step("beginSignIn", setup.signIn ?? PROMPT)),
     forgetSession: vi.fn(async () => step("forgetSession", undefined)),
@@ -623,6 +621,18 @@ describe("upload_to_matter: the confirmed call", () => {
     const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
 
     expect(textOf(result)).toBe(`${DONE_TEXT}\n${warning}`);
+    expect(result.structuredContent).toEqual({
+      status: "done",
+      matter_id: 7,
+      matter_url: "https://dikigoros.ai/matters/7",
+      results: RESULTS,
+      warning,
+    });
+  });
+
+  it("has no warning in its structured content when the keychain works", async () => {
+    const result = await call(handleUploadToMatter, CONFIRMED, fakes().deps);
+    expect(result.structuredContent).not.toHaveProperty("warning");
   });
 
   it.each([

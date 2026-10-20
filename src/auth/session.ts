@@ -6,6 +6,7 @@
 // not print.
 
 import type { HelperConfig } from "../config";
+import { reason } from "../util";
 import {
   type DeviceCodeResponse,
   DeviceFlowError,
@@ -218,9 +219,4 @@ function refusedByAuth0(err: unknown): boolean {
     err.code !== "too_many_requests" &&
     err.code !== `http_${err.status}`
   );
-}
-
-/** An error's message, first line only; never a stack, never a value thrown in place of an Error. */
-function reason(err: unknown): string {
-  return err instanceof Error ? err.message.split(/\r?\n/, 1)[0] : "unknown error";
 }

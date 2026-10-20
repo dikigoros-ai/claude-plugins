@@ -15,6 +15,7 @@ import type { ExtractedPdf } from "../extract/pdf";
 import { headBytesBase64 } from "../extract/sniff";
 import { decodeTextBytes, MAX_TEXT_DOCUMENT_CHARS, normalizeTextDocument } from "../extract/text";
 import type { PlanEntry } from "../files/resolve";
+import { firstLine } from "../util";
 
 /** Between two polls of the processing, as in the browser. */
 export const POLL_INTERVAL_MS = 1500;
@@ -383,8 +384,4 @@ function refusedRead(err: unknown): undefined {
 /** `code`, with the web uploader's sentence for it when there is one. */
 function because(code: string): { code: string; message?: string } {
   return { code, message: SENTENCES[code] };
-}
-
-function firstLine(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0];
 }

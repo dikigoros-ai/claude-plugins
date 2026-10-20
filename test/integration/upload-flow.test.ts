@@ -66,7 +66,6 @@ interface Report {
 
 /** A session that always holds the fake's token and must never be asked to sign in or out. */
 const SESSION: SessionLike = {
-  status: () => "signed_in",
   getAccessToken: async () => TEST_TOKEN,
   beginSignIn: async () => {
     throw new Error("beginSignIn must not be called");

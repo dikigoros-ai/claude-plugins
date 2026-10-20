@@ -9,6 +9,7 @@
 // Nothing is imported from that repository.
 
 import type { FetchLike } from "../auth/device-flow";
+import { isRecord } from "../util";
 import { ApiError } from "./errors";
 
 // ---------- Shapes (lib/matters.ts, lib/i18n.ts, lib/api.ts @ 37f39ac5) ----------
@@ -439,10 +440,6 @@ function member<T>(answer: Answer, key: string, accepts: (value: unknown) => boo
 
 function invalidResponse({ status }: Answer): ApiError {
   return new ApiError(status, "invalid_response");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isNonEmptyString(value: unknown): value is string {

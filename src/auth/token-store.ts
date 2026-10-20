@@ -2,6 +2,8 @@
 // when no keychain can be reached, this process's memory (the lawyer then signs in again next run).
 // Nothing here logs, and no error raised here carries a secret.
 
+import { reason } from "../util";
+
 /** The keychain service the helper's entries are filed under; each account is a base URL. */
 export const KEYRING_SERVICE = "dikigoros-upload-helper";
 
@@ -26,21 +28,21 @@ export interface KeyringBinding {
   Entry: new (service: string, account: string) => KeyringEntryLike;
 }
 
-/** Secrets kept for the life of this process only. */
+/** Secrets kept for the life of this process only, in a #private field, which util.inspect does not print. */
 export class MemoryTokenStore implements TokenStore {
   readonly kind = "memory";
-  private readonly secrets = new Map<string, string>();
+  readonly #secrets = new Map<string, string>();
 
   async get(account: string): Promise<string | null> {
-    return this.secrets.get(account) ?? null;
+    return this.#secrets.get(account) ?? null;
   }
 
   async set(account: string, secret: string): Promise<void> {
-    this.secrets.set(account, secret);
+    this.#secrets.set(account, secret);
   }
 
   async delete(account: string): Promise<void> {
-    this.secrets.delete(account);
+    this.#secrets.delete(account);
   }
 }
 
@@ -78,8 +80,8 @@ const PROBE_ACCOUNT = "__probe__";
 
 /**
  * The keychain store when `loadBinding` resolves and reading an entry through it does not throw;
- * otherwise a memory store and a warning for the lawyer. The warning's reason is the error's
- * message alone: never its stack, never a value thrown in place of an Error.
+ * otherwise a memory store and a warning for the lawyer. The warning's reason is the first line of
+ * the error's message alone: never its stack, never a value thrown in place of an Error.
  */
 export async function createTokenStore(
   loadBinding: () => Promise<KeyringBinding>,
@@ -89,10 +91,9 @@ export async function createTokenStore(
     new binding.Entry(KEYRING_SERVICE, PROBE_ACCOUNT).getPassword();
     return { store: new KeyringTokenStore(binding), warning: null };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : "unknown error";
     return {
       store: new MemoryTokenStore(),
-      warning: `The OS keychain is not available on this machine (${reason}); the sign-in is kept in memory for this session only.`,
+      warning: `The OS keychain is not available on this machine (${reason(err)}); the sign-in is kept in memory for this session only.`,
     };
   }
 }

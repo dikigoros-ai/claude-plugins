@@ -19,6 +19,7 @@ import {
   type UploadPlan,
 } from "../files/resolve";
 import type { DocumentOutcome, UploadContext } from "../pipeline/upload-document";
+import { firstLine } from "../util";
 
 // Ported from dikigoros-ai/dikigoros-ai lib/matters.ts @ 37f39ac5 (2026-10-19): the matter types,
 // the roles a lawyer may give a document (every role but `generated`, which the server alone
@@ -46,7 +47,7 @@ export const MATTER_UPLOAD_ROLES = [
 export const MATTER_SIDES = ["ours", "theirs", "neutral"] as const;
 
 /** The part of the sign-in the tools use. */
-export type SessionLike = Pick<AuthSession, "status" | "getAccessToken" | "beginSignIn" | "forgetSession">;
+export type SessionLike = Pick<AuthSession, "getAccessToken" | "beginSignIn" | "forgetSession">;
 
 export interface ToolDeps {
   config: HelperConfig;
@@ -331,7 +332,13 @@ async function report(matterId: number, reported: DocumentOutcome[], deps: ToolD
     message: outcome.message,
     role_applied: outcome.roleApplied,
   }));
-  return answer(lines.join("\n"), { status: "done", matter_id: matterId, matter_url: matterUrl, results });
+  return answer(lines.join("\n"), {
+    status: "done",
+    matter_id: matterId,
+    matter_url: matterUrl,
+    results,
+    ...(warning === null ? {} : { warning }),
+  });
 }
 
 /**
@@ -465,8 +472,4 @@ function answer(text: string, structuredContent?: Record<string, unknown>): Call
 /** An error result: the call did not do what it was asked to. */
 function failure(text: string): CallToolResult {
   return { content: [{ type: "text", text }], isError: true };
-}
-
-function firstLine(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0];
 }

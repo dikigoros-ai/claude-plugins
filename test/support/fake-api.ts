@@ -15,6 +15,7 @@ import type { AddressInfo } from "node:net";
 import { MAX_TEXT_DOCUMENT_CHARS, normalizeTextDocument } from "../../src/extract/text";
 import { MAX_FILE_BYTES } from "../../src/files/resolve";
 import { MATTER_SIDES, MATTER_TYPES, MATTER_UPLOAD_ROLES } from "../../src/server/tools";
+import { isRecord } from "../../src/util";
 
 /** The one bearer the API takes: any other, or none, is answered 401. */
 export const TEST_TOKEN = "test-token";
@@ -627,10 +628,6 @@ function trimmed(value: unknown, max: number): string {
 
 function oneOf<T extends string>(values: readonly T[], value: unknown): value is T {
   return typeof value === "string" && (values as readonly string[]).includes(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The body parsed as JSON; undefined when it is not JSON. */

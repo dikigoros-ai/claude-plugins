@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import { expect, it } from "vitest";
 import {
   createTokenStore,
@@ -68,6 +69,13 @@ it("MemoryTokenStore keeps one secret per account until it is deleted", async ()
   expect(await store.get(OTHER_ACCOUNT)).toBe("rt-local");
 });
 
+it("MemoryTokenStore keeps its secrets where util.inspect does not show them", async () => {
+  const store = new MemoryTokenStore();
+  await store.set(ACCOUNT, "rt-secret-1");
+  expect(inspect(store, { showHidden: true, depth: Infinity })).not.toContain("rt-secret-1");
+  expect(JSON.stringify(store)).not.toContain("rt-secret-1");
+});
+
 it("KeyringTokenStore files each account under the dikigoros-upload-helper service", async () => {
   const { binding, vault } = fakeKeyring();
   const store = new KeyringTokenStore(binding);
@@ -130,6 +138,15 @@ it("createTokenStore falls back to memory, with the warning, when the probe thro
   expect(store.kind).toBe("memory");
   expect(warning).toBe(
     "The OS keychain is not available on this machine (Platform secure storage failure: no Secret Service is running); the sign-in is kept in memory for this session only.",
+  );
+});
+
+it("createTokenStore puts only the first line of the error's message into the warning", async () => {
+  const { warning } = await createTokenStore(async () => {
+    throw new Error("Cannot find module '@napi-rs/keyring'\nRequire stack:\n- /Users/eleni/.dikigoros/helper/native/x.mjs");
+  });
+  expect(warning).toBe(
+    "The OS keychain is not available on this machine (Cannot find module '@napi-rs/keyring'); the sign-in is kept in memory for this session only.",
   );
 });
 

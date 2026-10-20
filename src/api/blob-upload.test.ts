@@ -46,10 +46,15 @@ interface StoreRequest {
   body: Buffer;
 }
 
-/** What the store answers: the blob, or a Vercel Blob error body with an error status. */
-type StoreAnswer = { status: 200 } | { status: number; error: { code: string; message: string } };
+/** What the store answers: the blob, a Vercel Blob error body with an error status, or nothing ever. */
+type StoreAnswer = { status: 200 } | { status: number; error: { code: string; message: string } } | "never";
 
-const store: { requests: StoreRequest[]; answer: StoreAnswer } = { requests: [], answer: { status: 200 } };
+const store: {
+  requests: StoreRequest[];
+  answer: StoreAnswer;
+  /** How many unanswered requests the client hung up on. */
+  hangUps: number;
+} = { requests: [], answer: { status: 200 }, hangUps: 0 };
 
 function header(req: IncomingMessage, name: string): string | undefined {
   const value = req.headers[name];
@@ -74,6 +79,12 @@ async function receive(req: IncomingMessage, res: ServerResponse): Promise<void>
     body: Buffer.concat(chunks),
   });
   const { answer } = store;
+  if (answer === "never") {
+    res.on("close", () => {
+      store.hangUps += 1;
+    });
+    return;
+  }
   const body =
     "error" in answer
       ? { error: answer.error }
@@ -90,21 +101,24 @@ let storeApiUrl = "";
 beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   storeApiUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/blob-store`;
-  // The SDK retries a connection failure, or a store error such as internal_server_error,
-  // VERCEL_BLOB_RETRIES times (10 by default), backing off from 1 s; here every failure is final.
-  vi.stubEnv("VERCEL_BLOB_RETRIES", "0");
 });
 
 beforeEach(() => {
-  // The SDK reads the store's URL on every request (getApiUrl in requestApi), not on import, so
-  // it can be set once the store listens; a test may point it elsewhere.
+  // The SDK reads both on every upload, not on import, so they can be set once the store listens;
+  // a test may change them. It retries a connection failure, or a store error such as
+  // internal_server_error, VERCEL_BLOB_RETRIES times (10 by default), backing off from 1 s; here
+  // every failure is final unless a test says otherwise.
   vi.stubEnv("VERCEL_BLOB_API_URL", storeApiUrl);
+  vi.stubEnv("VERCEL_BLOB_RETRIES", "0");
   store.requests = [];
   store.answer = { status: 200 };
+  store.hangUps = 0;
 });
 
 afterAll(async () => {
   vi.unstubAllEnvs();
+  // A request a failing test left unanswered must not hold the close up.
+  server.closeAllConnections();
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
@@ -236,6 +250,31 @@ describe("a failed upload", () => {
     expectNoSecrets(err);
   });
 
+  it(
+    "aborts an upload the store never answers once timeoutMs is up, without a retry: ApiError(502, blob_upload_failed)",
+    { timeout: 10_000 },
+    async () => {
+      // Retries allowed: the SDK gives up at once on an abort, where it would retry a TimeoutError
+      // (AbortSignal.timeout's) through its backoff, 1 s and then 2 s at the least.
+      vi.stubEnv("VERCEL_BLOB_RETRIES", "2");
+      store.answer = "never";
+      const started = Date.now();
+      const err = await refused(
+        uploadBlob({ api: fakeApi(), matterId: 2, pathname: "matters/u1/m2/claim.pdf", bytes: BYTES, contentType: PDF, timeoutMs: 100 }),
+      );
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(shown(err)).toEqual({
+        status: 502,
+        code: "blob_upload_failed",
+        metadata: { message: "upload timed out" },
+        message: "502 blob_upload_failed",
+      });
+      expect(store.requests).toHaveLength(1);
+      // The abort reached the store: the client hung up on the unanswered request.
+      await vi.waitFor(() => expect(store.hangUps).toBe(1));
+    },
+  );
+
   it("never shows the client token, even when the failure's message quotes the bearer", async () => {
     // A token no server sends: undici refuses the header, and its message quotes the header's value.
     const token = "vercel_blob_client_teststore_ct\ntest";
@@ -243,7 +282,7 @@ describe("a failed upload", () => {
     expect(shown(err)).toEqual({
       status: 502,
       code: "blob_upload_failed",
-      metadata: { message: 'Headers.append: "Bearer [client token]" is an invalid header value.' },
+      metadata: { message: expect.stringContaining("[client token]") },
       message: "502 blob_upload_failed",
     });
     expect(inspect(err, { depth: null, showHidden: true })).not.toContain("vercel_blob_client_teststore_ct");

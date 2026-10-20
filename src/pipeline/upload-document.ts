@@ -7,7 +7,7 @@
 
 import { createHash } from "node:crypto";
 import type { BlobContentType, uploadBlob } from "../api/blob-upload";
-import type { DikigorosApi, IngestManifest, MatterDocumentRecord } from "../api/client";
+import type { DikigorosApi, IngestManifest, MatterDocumentRecord, ProcessResult } from "../api/client";
 import { ApiError, describeApiError } from "../api/errors";
 import type { extractDocx } from "../extract/docx";
 import type { ExtractedPdf } from "../extract/pdf";
@@ -60,13 +60,13 @@ export interface DocumentOutcome {
   /** When ready: the document's pages, and the pages its ingest sent to OCR (when it had one). */
   pageCount?: number;
   ocrPages?: number;
-  /** When left processing: the pages still to OCR at the last poll. */
+  /** When left processing: the pages still to OCR, as the last poll answered. */
   ocrRemaining?: number;
   /** Why the document failed or was skipped. */
   code?: string;
   /** A sentence for the lawyer: why, or what happens next. */
   message?: string;
-  /** When a role or a side was given: whether the server took it. */
+  /** When a role or a side was given: whether the server took it; false for a resumed twin, which is not patched. */
   roleApplied?: boolean;
 }
 
@@ -97,7 +97,7 @@ export async function uploadDocument(entry: PlanEntry, ctx: UploadContext, deps:
   const upload = new DocumentUpload(entry.name, ctx, deps);
   try {
     // The path the plan checked, its links resolved: a link changed since then is not followed.
-    const bytes = await deps.readFile(entry.realPath);
+    const bytes = await locally("unreadable", () => deps.readFile(entry.realPath));
     return entry.kind === "text" ? await upload.text(bytes) : await upload.file(bytes, entry.kind);
   } catch (err) {
     return upload.failure(err);
@@ -139,9 +139,9 @@ class DocumentUpload {
     let manifest: IngestManifest;
     let pageCount: number | undefined;
     if (kind === "docx") {
-      manifest = { kind: "docx", fullText: (await extractDocx(bytes)).fullText };
+      manifest = { kind: "docx", fullText: (await locally("extraction_failed", () => extractDocx(bytes))).fullText };
     } else {
-      const { pages, images } = await extractPdf(bytes);
+      const { pages, images } = await locally("extraction_failed", () => extractPdf(bytes));
       // Nothing to read: no page has a text layer and none rendered any ink. The original is in
       // the store already, as in the browser; it goes with the matter.
       if (pages.length > 0 && pages.every((p) => p.needsOcr) && images.size === 0) {
@@ -162,11 +162,13 @@ class DocumentUpload {
     }
 
     const create = () => api.createDocument(matterId, { filename: this.#name, mimeType, ...facts, blobUrl: blob.url });
-    return this.#register(this.#documents, create, async (doc) => {
-      const ingest = () => api.ingest(matterId, doc.id, manifest);
-      const { ocrPages } = await this.#call("POST", `${this.#documents}/${doc.id}/ingest`, ingest);
-      return this.#poll(doc.id, { pageCount, ocrPages });
-    });
+    // Our new row, or a twin left pending by a run that died before its ingest: given the manifest, then polled.
+    const ingestAndPoll = async (docId: number) => {
+      const ingest = () => api.ingest(matterId, docId, manifest);
+      const { ocrPages } = await this.#call("POST", `${this.#documents}/${docId}/ingest`, ingest);
+      return this.#poll(docId, { pageCount, ocrPages });
+    };
+    return this.#register(this.#documents, create, (doc) => ingestAndPoll(doc.id), ingestAndPoll);
   }
 
   /** A .txt or .md: decoded and normalised here, posted as text, its role set, then polled. */
@@ -183,10 +185,8 @@ class DocumentUpload {
 
   /** The outcome of the rejection that ended the upload. */
   failure(err: unknown): DocumentOutcome {
-    if (!(err instanceof ApiError)) {
-      const firstLine = (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0];
-      return this.#outcome("failed", { code: "network", message: firstLine });
-    }
+    if (err instanceof LocalFailure) return this.#outcome("failed", { code: err.code, message: err.message });
+    if (!(err instanceof ApiError)) return this.#outcome("failed", { code: "network", message: firstLine(err) });
     // A 401 that the client's retry with a fresh token did not get past: the route refuses the
     // helper's token (it is not on the connector-token allowlist yet) or the session is dead. A
     // not_signed_in was never sent: there was no token.
@@ -205,18 +205,19 @@ class DocumentUpload {
 
   /**
    * Creates the row and sets its role, then goes on with `next`; for a file the matter holds
-   * already (duplicate_document), the outcome of its twin instead.
+   * already (duplicate_document), the twin's way instead, `ingestPending` for a pending twin.
    */
   async #register(
     path: string,
     create: () => Promise<MatterDocumentRecord>,
     next: (doc: MatterDocumentRecord) => Promise<DocumentOutcome>,
+    ingestPending?: (twinId: number) => Promise<DocumentOutcome>,
   ): Promise<DocumentOutcome> {
     let doc: MatterDocumentRecord;
     try {
       doc = await this.#call("POST", path, create);
     } catch (err) {
-      if (err instanceof ApiError && err.code === "duplicate_document") return this.#twin(err);
+      if (err instanceof ApiError && err.code === "duplicate_document") return this.#twin(err, ingestPending);
       throw err;
     }
     this.#documentId = doc.id;
@@ -225,18 +226,27 @@ class DocumentUpload {
   }
 
   /**
-   * The twin a duplicate_document refusal names: followed to the end when it is processing or
-   * failed (its processing resumed, as the matter page would), else reported as a duplicate.
+   * The twin a duplicate_document refusal names. One that is processing or failed is polled (its
+   * processing resumed, as the matter page would); a pending one, when there is a manifest for it,
+   * is given it and polled. A ready twin, or one the server will not show, is a duplicate.
    */
-  async #twin(err: ApiError): Promise<DocumentOutcome> {
+  async #twin(err: ApiError, ingestPending?: (twinId: number) => Promise<DocumentOutcome>): Promise<DocumentOutcome> {
     const duplicate = () => this.#outcome("duplicate", { message: describeApiError(err, this.#ctx.baseUrl) });
     const twinId = err.metadata.documentId;
     if (typeof twinId !== "number") return duplicate();
     this.#documentId = twinId;
     const read = () => this.#deps.api.getDocument(this.#ctx.matterId, twinId);
-    const { ingestStatus, pageCount } = await this.#call("GET", `${this.#documents}/${twinId}`, read);
-    const resumable = ingestStatus === "processing" || ingestStatus === "failed";
-    return resumable ? this.#poll(twinId, { pageCount }) : duplicate();
+    const twin = await this.#call("GET", `${this.#documents}/${twinId}`, read).catch(refusedRead);
+    // A resumed twin is not ours to re-role: a role or a side given is not applied to it.
+    const resume = (next: () => Promise<DocumentOutcome>) => {
+      if (this.#ctx.role !== undefined || this.#ctx.side !== undefined) this.#roleApplied = false;
+      return next();
+    };
+    if (twin?.ingestStatus === "processing" || twin?.ingestStatus === "failed") {
+      return resume(() => this.#poll(twinId, { pageCount: twin.pageCount }));
+    }
+    if (twin?.ingestStatus === "pending" && ingestPending) return resume(() => ingestPending(twinId));
+    return duplicate();
   }
 
   /** Sets the role and the side given, right after creation; a 401 or a 403 leaves them unset. */
@@ -259,15 +269,23 @@ class DocumentUpload {
 
   /**
    * Runs the processing a batch at a time, a poll every pollIntervalMs, until the document is
-   * ready or failed; after maxWaitMs of polling it is left processing.
+   * ready or failed; after maxWaitMs of polling it is left processing, the row still resumable.
    */
   async #poll(docId: number, known: { pageCount?: number; ocrPages?: number }): Promise<DocumentOutcome> {
     const { api, sleep, now, log, pollIntervalMs = POLL_INTERVAL_MS, maxWaitMs = DEFAULT_MAX_WAIT_MS } = this.#deps;
     const path = `${this.#documents}/${docId}/process`;
     const start = now();
     let ocrRemaining = known.ocrPages;
+    let logged: number | undefined;
+    let lastFailure: string | undefined; // the first line of the transient failure the last poll ended in
     for (;;) {
-      const result = await this.#call("POST", path, () => api.process(this.#ctx.matterId, docId)).catch(lostClaim);
+      let result: ProcessResult | undefined;
+      try {
+        result = await this.#call("POST", path, () => api.process(this.#ctx.matterId, docId));
+        lastFailure = undefined;
+      } catch (err) {
+        lastFailure = pollAgainAfter(err);
+      }
       if (result?.status === "ready") {
         const pageCount = result.document?.pageCount ?? known.pageCount;
         return this.#outcome("ready", { pageCount, ocrPages: known.ocrPages });
@@ -275,9 +293,16 @@ class DocumentUpload {
       if (result?.status === "failed") return this.#outcome("failed", because(result.errorCode ?? "processing_failed"));
       if (result) {
         ocrRemaining = result.ocrRemaining;
-        log(`${this.#name}: OCR, ${ocrRemaining} page(s) remaining`);
+        // A line when the count changes, not one per poll.
+        if (ocrRemaining !== logged) {
+          log(ocrRemaining > 0 ? `${this.#name}: OCR, ${ocrRemaining} page(s) remaining` : `${this.#name}: finalizing`);
+        }
+        logged = ocrRemaining;
       }
-      if (now() - start > maxWaitMs) return this.#outcome("processing", { ocrRemaining, message: STILL_PROCESSING });
+      if (now() - start > maxWaitMs) {
+        const failed = lastFailure === undefined ? "" : ` (the last poll failed: ${lastFailure})`;
+        return this.#outcome("processing", { ocrRemaining, message: STILL_PROCESSING + failed });
+      }
       await sleep(pollIntervalMs);
     }
   }
@@ -296,13 +321,44 @@ class DocumentUpload {
   }
 }
 
-/** A lost concurrency claim (another poll runs the same batch) is benign: no answer, poll again. */
-function lostClaim(err: unknown): null {
-  if (err instanceof ApiError && err.status === 409 && err.code === "processing_in_progress") return null;
+/** A local step's rejection: the read (unreadable) or an extractor (extraction_failed), with its first line. */
+class LocalFailure extends Error {
+  constructor(readonly code: "unreadable" | "extraction_failed", cause: unknown) {
+    super(firstLine(cause), { cause });
+  }
+}
+
+/** Runs a local step; its rejection becomes a LocalFailure with `code`. */
+async function locally<T>(code: LocalFailure["code"], step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (err) {
+    throw new LocalFailure(code, err);
+  }
+}
+
+/**
+ * A rejected poll that is polled again: a lost concurrency claim (another poll runs the same
+ * batch) leaves nothing behind, a transient failure (no answer, a 5xx, a 429) its first line. Any
+ * other refusal ends the upload.
+ */
+function pollAgainAfter(err: unknown): string | undefined {
+  if (err instanceof ApiError && err.status === 409 && err.code === "processing_in_progress") return undefined;
+  if (!(err instanceof ApiError) || err.status >= 500 || err.status === 429) return firstLine(err);
+  throw err;
+}
+
+/** A twin the server will not show (401, 403, 404) is a duplicate all the same: no twin to follow. */
+function refusedRead(err: unknown): undefined {
+  if (err instanceof ApiError && (err.status === 401 || err.status === 403 || err.status === 404)) return undefined;
   throw err;
 }
 
 /** `code`, with the web uploader's sentence for it when there is one. */
 function because(code: string): { code: string; message?: string } {
   return { code, message: SENTENCES[code] };
+}
+
+function firstLine(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0];
 }

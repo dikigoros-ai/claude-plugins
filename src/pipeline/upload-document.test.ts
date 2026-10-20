@@ -161,6 +161,7 @@ interface Answers {
   readFile?: Queue<Uint8Array>;
   uploadBlob?: Queue<{ url: string }>;
   extractPdf?: Queue<ExtractedPdf>;
+  extractDocx?: Queue<{ fullText: string }>;
   createDocument?: Queue<MatterDocumentRecord>;
   createTextDocument?: Queue<MatterDocumentRecord>;
   patchDocument?: Queue<MatterDocumentRecord>;
@@ -196,7 +197,7 @@ function fakes(answers: Answers = {}) {
   });
   const readFile = fake("readFile", answers.readFile, PDF_BYTES);
   const extractPdf = fake("extractPdf", answers.extractPdf, TWO_PAGES);
-  const extractDocx = fake("extractDocx", undefined, { fullText: DOCX_TEXT });
+  const extractDocx = fake("extractDocx", answers.extractDocx, { fullText: DOCX_TEXT });
   let clock = 1_760_870_400_000;
   const sleep = vi.fn(async (ms: number) => {
     calls.push(`sleep(${ms})`);
@@ -375,6 +376,36 @@ describe("uploadDocument: a PDF or a DOCX", () => {
     expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
   });
 
+  it("keeps a scanned page that rendered blank as needing OCR, beside one that rendered ink", async () => {
+    const mixed: ExtractedPdf = {
+      pages: [
+        { page: 1, text: "", needsOcr: true },
+        { page: 2, text: "", needsOcr: true },
+      ],
+      images: new Map([[1, JPEG_P1]]),
+    };
+    const f = fakes({ extractPdf: [mixed], ingest: [{ ocrPages: 2 }] });
+    const outcome = await uploadDocument(planned("scan.pdf", "pdf"), CTX, f.deps);
+
+    expect(f.calls).toEqual([
+      "readFile",
+      "uploadBlob(matters/u42/m7/scan.pdf)",
+      "extractPdf",
+      "uploadBlob(matters/u42/m7/pages/p1.jpg)",
+      "createDocument",
+      "ingest",
+      "process",
+    ]);
+    expect(f.api.ingest.mock.calls[0][2]).toStrictEqual({
+      kind: "pdf",
+      pages: [
+        { page: 1, text: "", needsOcr: true, imageBlobKey: `${STORE}matters/u42/m7/pages/p1.jpg-x` },
+        { page: 2, text: "", needsOcr: true },
+      ],
+    });
+    expect(outcome).toStrictEqual({ name: "scan.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 2 });
+  });
+
   it("registers a PDF without pages as it is, as the browser does", async () => {
     const f = fakes({ extractPdf: [{ pages: [], images: new Map() }], process: [ready(0)] });
     const outcome = await uploadDocument(planned("empty.pdf", "pdf"), CTX, f.deps);
@@ -419,12 +450,8 @@ describe("uploadDocument: a PDF or a DOCX", () => {
         { page: 2, text: "Σφραγίδα", needsOcr: true, imageBlobKey: `${STORE}matters/u42/m7/pages/p2.jpg-x` },
       ],
     });
-    expect(f.log.mock.calls).toEqual([
-      ["bundle.pdf: OCR, 2 page(s) remaining"],
-      ["bundle.pdf: OCR, 2 page(s) remaining"],
-      ["bundle.pdf: OCR, 1 page(s) remaining"],
-      ["bundle.pdf: OCR, 1 page(s) remaining"],
-    ]);
+    // A line when the count changes, not one per poll.
+    expect(f.log.mock.calls).toEqual([["bundle.pdf: OCR, 2 page(s) remaining"], ["bundle.pdf: OCR, 1 page(s) remaining"]]);
     expect(outcome).toStrictEqual({
       name: "bundle.pdf",
       status: "processing",
@@ -441,6 +468,7 @@ describe("uploadDocument: a PDF or a DOCX", () => {
     // Polls at 0, 1.5 s, …, 601.5 s: the first one past 600 s ends the wait.
     expect(f.api.process).toHaveBeenCalledTimes(402);
     expect(f.sleep.mock.calls).toEqual(Array.from({ length: 401 }, () => [1500]));
+    expect(f.log.mock.calls).toEqual([["bundle.pdf: OCR, 40 page(s) remaining"]]);
     expect(outcome).toStrictEqual({
       name: "bundle.pdf",
       status: "processing",
@@ -465,6 +493,47 @@ describe("uploadDocument: the poll", () => {
     expect(f.calls.slice(-4)).toEqual(["ingest", "process", "sleep(1500)", "process"]);
     expect(f.log).not.toHaveBeenCalled();
     expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
+  });
+
+  it("logs the OCR count only when it changes, and finalizing once it is 0", async () => {
+    const f = fakes({
+      ingest: [{ ocrPages: 3 }],
+      process: [processing(3), processing(3), processing(1), processing(0), processing(0), ready(2)],
+    });
+    await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+    expect(f.log.mock.calls).toEqual([
+      ["claim.pdf: OCR, 3 page(s) remaining"],
+      ["claim.pdf: OCR, 1 page(s) remaining"],
+      ["claim.pdf: finalizing"],
+    ]);
+  });
+
+  it.each([
+    ["a request that got no answer", new TypeError("fetch failed")],
+    ["a 500", new ApiError(500, "http_500")],
+    ["a 503", new ApiError(503, "http_503")],
+    ["a 429", new ApiError(429, "Too many requests")],
+  ])("polls on after %s, and follows the document to ready", async (_what, blip) => {
+    const f = fakes({ process: [processing(1), blip, ready(2)] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+    expect(f.calls.slice(-6)).toEqual(["ingest", "process", "sleep(1500)", "process", "sleep(1500)", "process"]);
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
+  });
+
+  const unavailable = () => new ApiError(503, "http_503");
+  it.each([
+    [
+      "never comes back",
+      [processing(2), unavailable(), unavailable(), unavailable()],
+      `${STILL_PROCESSING} (the last poll failed: 503 http_503)`,
+    ],
+    ["comes back before the wait ends", [unavailable(), processing(2), processing(2), processing(2)], STILL_PROCESSING],
+  ])("leaves the document processing when the server %s", async (_what, answers, message) => {
+    const f = fakes({ ingest: [{ ocrPages: 3 }], process: answers });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, { ...f.deps, maxWaitMs: 3000 });
+    // At 0, 1.5, 3 and 4.5 s: past 3 s after the fourth poll. The count is the last one answered.
+    expect(f.api.process).toHaveBeenCalledTimes(4);
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "processing", documentId: 31, ocrRemaining: 2, message });
   });
 
   it("ends on any other 409 from the poll", async () => {
@@ -494,9 +563,9 @@ describe("uploadDocument: the poll", () => {
 });
 
 describe("uploadDocument: a file already in the matter", () => {
-  it.each(["ready", "pending"] as const)("reports a duplicate whose twin is %s, with the twin's id", async (status) => {
-    const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [twin(status)] });
-    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+  it("reports a duplicate whose twin is ready, with the twin's id", async () => {
+    const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [twin("ready")] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, role: "exhibit" }, f.deps);
 
     expect(f.calls).toEqual([
       "readFile",
@@ -517,7 +586,7 @@ describe("uploadDocument: a file already in the matter", () => {
 
   it.each(["processing", "failed"] as const)("resumes the processing of a %s twin and follows it to ready", async (status) => {
     const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [twin(status)], process: [processing(1), ready(2)] });
-    // The twin is not ours to re-role: it is polled as it is.
+    // The twin is not ours to re-role: it is polled as it is, and the role given is not applied.
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, role: "exhibit" }, f.deps);
 
     expect(f.calls.slice(4)).toEqual(["createDocument", "getDocument", "process", "sleep(1500)", "process"]);
@@ -525,7 +594,67 @@ describe("uploadDocument: a file already in the matter", () => {
       [7, 12],
       [7, 12],
     ]);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 12, pageCount: 2 });
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 12, pageCount: 2, roleApplied: false });
+  });
+
+  it("ingests the manifest it built into a pending twin, then polls it", async () => {
+    const f = fakes({
+      createDocument: [duplicateOf(12)],
+      getDocument: [twin("pending")],
+      ingest: [{ ocrPages: 1 }],
+      process: [processing(1), ready(2)],
+    });
+    // A run that died between the create and the ingest left the twin pending.
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, side: "ours" }, f.deps);
+
+    expect(f.calls.slice(4)).toEqual(["createDocument", "getDocument", "ingest", "process", "sleep(1500)", "process"]);
+    expect(f.api.ingest.mock.calls).toStrictEqual([
+      [
+        7,
+        12,
+        {
+          kind: "pdf",
+          pages: [
+            { page: 1, text: TWO_PAGES.pages[0].text, needsOcr: false },
+            { page: 2, text: "", needsOcr: true, imageBlobKey: `${STORE}matters/u42/m7/pages/p2.jpg-x` },
+          ],
+        },
+      ],
+    ]);
+    expect(f.api.process.mock.calls).toEqual([
+      [7, 12],
+      [7, 12],
+    ]);
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "ready",
+      documentId: 12,
+      pageCount: 2,
+      ocrPages: 1,
+      roleApplied: false,
+    });
+  });
+
+  it.each([
+    [401, "Authentication required"],
+    [403, "entitlement_required"],
+    [404, "Not found"],
+  ])("reports a duplicate with the twin's id when the twin's read is refused with %i", async (status, code) => {
+    const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [new ApiError(status, code)] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+    expect(f.calls.slice(4)).toEqual(["createDocument", "getDocument"]);
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "duplicate",
+      documentId: 12,
+      message: "This file is already in the matter (document #12).",
+    });
+  });
+
+  it("fails when the twin's read gets no answer", async () => {
+    const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [new TypeError("fetch failed")] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", documentId: 12, code: "network", message: "fetch failed" });
   });
 
   it("reports a duplicate without an id when the refusal names no twin", async () => {
@@ -641,7 +770,7 @@ describe("uploadDocument: a text document", () => {
       "text_encoding",
       "This file is not UTF-8 text — save it as UTF-8 or upload it as PDF/DOCX",
     ],
-    ["a file of whitespace only", utf8("﻿ \r\n\t\r\n"), "text_empty", "The file is empty"],
+    ["a file of whitespace only", utf8("\uFEFF \r\n\t\r\n"), "text_empty", "The file is empty"],
     [
       "a text one character over the cap",
       utf8("α".repeat(200_001)),
@@ -691,13 +820,6 @@ describe("uploadDocument: failures", () => {
       { process: [processing(1), refused()] },
       "POST /api/matters/7/documents/31/process",
       { documentId: 31 },
-    ],
-    [
-      "the twin's read",
-      planned("claim.pdf", "pdf"),
-      { createDocument: [duplicateOf(12)], getDocument: [refused()] },
-      "GET /api/matters/7/documents/12",
-      { documentId: 12 },
     ],
     [
       "the text create",
@@ -752,6 +874,35 @@ describe("uploadDocument: failures", () => {
       message: "Verify this DIKIGOROS account's email address first, then try again.",
     });
   });
+
+  it("reports a file that could not be read as unreadable, with the first line of its error", async () => {
+    const message = "EACCES: permission denied, open '/Users/eleni/Matters/Georgiou/claim.pdf'";
+    const f = fakes({ readFile: [Object.assign(new Error(`${message}\n    at async open (node:internal/fs/promises:639:25)`), { code: "EACCES" })] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+    expect(f.calls).toEqual(["readFile"]);
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", code: "unreadable", message });
+  });
+
+  it.each([
+    ["a corrupt PDF", planned("claim.pdf", "pdf"), { extractPdf: [new Error("Invalid PDF structure.")] }, "Invalid PDF structure."],
+    [
+      "a zip that is not a DOCX",
+      planned("υπεράσπιση.docx", "docx"),
+      {
+        readFile: [DOCX_BYTES],
+        extractDocx: [new Error("Could not find main document part. Are you sure this is a valid .docx file?")],
+      },
+      "Could not find main document part. Are you sure this is a valid .docx file?",
+    ],
+  ] satisfies Array<[string, PlanEntry, Answers, string]>)(
+    "reports %s as extraction_failed, before anything is registered",
+    async (_what, entry, answers, message) => {
+      const f = fakes(answers);
+      const outcome = await uploadDocument(entry, CTX, f.deps);
+      expect(f.api.createDocument).not.toHaveBeenCalled();
+      expect(outcome).toStrictEqual({ name: entry.name, status: "failed", code: "extraction_failed", message });
+    },
+  );
 
   it("reports a request that got no answer as network, with the first line of its error", async () => {
     const f = fakes({ createDocument: [new TypeError("fetch failed\n    at node:internal/deps/undici/undici:13510:13")] });

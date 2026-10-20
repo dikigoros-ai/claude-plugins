@@ -201,9 +201,9 @@ export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const MAX_PATHS_PER_CALL = 50;
 export const MAX_FILES_PER_CALL = 100;
 export type FileKind = "pdf" | "docx" | "text";
-export type SkipReason = "not_absolute" | "not_found" | "not_a_file" | "dotfile" | "unsupported_type" | "too_large" | "empty" | "outside_directory" | "duplicate_path" | "too_many_files";
+export type SkipReason = "not_absolute" | "not_found" | "unreadable" | "not_a_file" | "dotfile" | "unsupported_type" | "too_large" | "empty" | "outside_directory" | "duplicate_path" | "too_many_files";
 export interface PlanEntry { path: string; realPath: string; name: string; sizeBytes: number; kind: FileKind | null; decision: "upload" | "skip"; reason?: SkipReason }
-export interface UploadPlan { entries: PlanEntry[]; digest: string }
+export interface UploadPlan { entries: PlanEntry[]; digest: string; emptyPaths: string[] /* named paths that produced no entry at all, e.g. a folder holding only subfolders or dotfiles */ }
 export async function resolveUploadPlan(paths: string[]): Promise<UploadPlan>;
 export function planDigest(entries: PlanEntry[]): string; // sha256 over the sorted "realPath\0sizeBytes" of upload entries, first 16 hex chars
 ```
@@ -220,13 +220,17 @@ it("skips a symlink whose real path leaves the named directory (outside_director
 it("deduplicates by real path when a file is named directly and through its directory (duplicate_path)");
 it("caps the upload list at MAX_FILES_PER_CALL (too_many_files)");
 it("digest changes when a planned file's size changes and ignores skipped entries");
+it("an empty .pdf is `empty`, not `unsupported_type`");
+it("a file or folder the process may not read is `unreadable` (EACCES), while a missing one is `not_found`"); // chmod 000; skipped when running as root
+it("a folder holding only subfolders or dotfiles yields no entries and is listed in emptyPaths");
+it("a .txt the process may not read is skipped as `unreadable`, not planned for upload");
 ```
 
 - [ ] **Step 2: Run to verify failure** — `npx vitest run src/files` → FAIL.
 
 - [ ] **Step 3: Implement `resolveUploadPlan`**
 
-Rules, in order per input path: `path.isAbsolute` else `not_absolute`; `lstat`/`stat` else `not_found`; a directory → its `readdir({ withFileTypes: true })` children that are files or symlinks to files, names not starting with `.`; a file → itself with the named directory = `dirname(path)`; for every candidate `realpath(candidate)` must start with `realpath(namedDirectory) + sep` else `outside_directory`; `name = basename(path as given)`; dotfile → `dotfile`; extension outside `MATTER_UPLOAD_EXT_RE` → `unsupported_type`; for `.pdf`/`.docx` read the first 8 bytes and require `sniffFileKind` to match the extension else `unsupported_type`; `size === 0` → `empty`; `size > MAX_FILE_BYTES` → `too_large`; a real path already planned → `duplicate_path`; more than `MAX_FILES_PER_CALL` upload entries → the rest `too_many_files`. Kind: `pdf`, `docx`, or `text` for `.txt`/`.md`. Entries keep input order.
+Rules, in order per input path: `path.isAbsolute` else `not_absolute`; `stat`: `ENOENT`/`ENOTDIR`/`ELOOP` → `not_found`, `EACCES`/`EPERM` → `unreadable` (branch on `err.code`; any other code → `unreadable`); a directory → its `readdir({ withFileTypes: true })` children that are files or symlinks to files, **omitting names that start with `.` silently** (they are not entries; `.DS_Store` and `._x` twins never reach the lawyer's table), sorted by name; a directory `readdir` that fails → `unreadable`; a file → itself with the named directory = `dirname(path)`; child paths are built by string concatenation (`directory + sep + name`), never `path.join`, so a `..` the caller wrote is seen by the OS, not collapsed; for every candidate `realpath(candidate)` must start with `realpath(namedDirectory) + sep` else `outside_directory`; `name = basename(path as given)`; a directly named dotfile → `dotfile`; extension outside `MATTER_UPLOAD_EXT_RE` → `unsupported_type`; `size === 0` → `empty`; `size > MAX_FILE_BYTES` → `too_large`; then open the file and read its first 8 bytes for **every** kind (an open that fails → `unreadable`), and for `.pdf`/`.docx` require `sniffFileKind` to match the extension else `unsupported_type`; a real path already planned → `duplicate_path`; more than `MAX_FILES_PER_CALL` upload entries → the rest `too_many_files`. Kind: `pdf` for `.pdf`, `docx` for `.docx`, `text` for `.txt`/`.md`, null otherwise (explicit map, no fall-through). Entries keep input order. A named path that produced no entry at all (a folder of subfolders or dotfiles) goes into `emptyPaths`.
 
 - [ ] **Step 4: Run to verify pass** — `npx vitest run src/files` → PASS.
 

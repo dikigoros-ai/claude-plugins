@@ -25,13 +25,14 @@ import lock from "../native/lock.generated.json" with { type: "json" };
 import { platformKey } from "../native/platform";
 import { uploadDocument, type UploadDeps } from "../pipeline/upload-document";
 import { resolveAssets } from "./assets";
+import { once } from "./lazy";
 import { registerTools, type ToolDeps } from "./tools";
 
 /** The plugin's version, defined by the build (scripts/build.ts); not defined when run from source. */
 declare const PLUGIN_VERSION: string | undefined;
 
 // stdout is the JSON-RPC channel: whatever a library prints goes to stderr instead.
-console.log = console.info = console.warn = console.debug = console.error;
+console.log = console.info = console.warn = console.debug = console.dir = console.error;
 // The blob SDK retries a failed upload 10 times by default, doubling its wait: half an hour of silence.
 process.env.VERCEL_BLOB_RETRIES ||= "2";
 
@@ -39,7 +40,7 @@ const log = (line: string) => console.error(`[dikigoros-upload] ${line}`);
 const config = loadConfigOrExit();
 const assets = resolveAssets(import.meta.url);
 
-/** The node_modules holding the native packages, found or installed once for the whole process. */
+/** The node_modules holding the native packages, found or installed on first use; a failed install is tried again. */
 const runtime = once(async () => {
   if (config.nativeDirOverride !== null) return { nodeModulesDir: config.nativeDirOverride };
   const platform = platformKey(process.platform, process.arch);
@@ -125,10 +126,4 @@ function serve(): void {
     registerTools(server, deps);
     return server;
   });
-}
-
-/** What `make` resolves to, made on the first call and shared by every later one. */
-function once<T>(make: () => Promise<T>): () => Promise<T> {
-  let made: Promise<T> | undefined;
-  return () => (made ??= make());
 }

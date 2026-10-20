@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import type * as z from "zod";
 import type { CurrentUser, DikigorosApi, Matter, MatterDetail, MatterDocumentSummary } from "../api/client";
 import { ApiError } from "../api/errors";
+import { DeviceFlowError } from "../auth/device-flow";
 import type { SignInPrompt } from "../auth/session";
 import type { HelperConfig } from "../config";
 import type { PlanEntry, UploadPlan } from "../files/resolve";
@@ -338,7 +339,12 @@ describe("upload_to_matter: the listing", () => {
 
       expect(result).toEqual({
         content: [{ type: "text", text: LISTING }],
-        structuredContent: { status: "confirmation_required", plan_digest: "3f2a9c0d1e4b5a67", files: FILES },
+        structuredContent: {
+          status: "confirmation_required",
+          plan_digest: "3f2a9c0d1e4b5a67",
+          files: FILES,
+          empty_paths: [EMPTY_FOLDER],
+        },
       });
       expect(result.isError).toBeUndefined();
       expect(f.resolvePlan.mock.calls).toEqual([[PATHS]]);
@@ -353,7 +359,12 @@ describe("upload_to_matter: the listing", () => {
 
     expect(result).toEqual({
       content: [{ type: "text", text: `The files have changed since they were listed.\n${LISTING}` }],
-      structuredContent: { status: "plan_changed", plan_digest: "3f2a9c0d1e4b5a67", files: FILES },
+      structuredContent: {
+        status: "plan_changed",
+        plan_digest: "3f2a9c0d1e4b5a67",
+        files: FILES,
+        empty_paths: [EMPTY_FOLDER],
+      },
     });
     expect(result.isError).toBeUndefined();
     expect(f.calls).toEqual(["getAccessToken", "resolvePlan"]);
@@ -497,6 +508,29 @@ describe("upload_to_matter: the confirmed call", () => {
     expect(result).toStrictEqual(errorResult("Matter not found (or not yours)."));
     expect(f.upload).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { what: "the current-user request gets no answer", setup: { me: new TypeError("fetch failed") }, line: "fetch failed" },
+    {
+      what: "the matter's address does not resolve",
+      setup: { matter: new Error("getaddrinfo ENOTFOUND dikigoros.ai\n    at GetAddrInfoReqWrap.onlookupall (node:dns:120:26)") },
+      line: "getaddrinfo ENOTFOUND dikigoros.ai",
+    },
+    {
+      what: "the sign-in service fails the refresh after a 401",
+      setup: { matter: new DeviceFlowError("http_503", "http_503", 503) },
+      line: "http_503",
+    },
+  ])("says DIKIGOROS could not be reached, and nothing was uploaded, when $what", async ({ setup, line }) => {
+    const f = fakes(setup);
+    const result = await call(handleUploadToMatter, CONFIRMED, f.deps);
+
+    expect(result).toStrictEqual(
+      errorResult(`Could not reach DIKIGOROS (${line}). Nothing was uploaded; try again in a moment.`),
+    );
+    expect(f.upload).not.toHaveBeenCalled();
+    expect(f.session.forgetSession).not.toHaveBeenCalled();
+  });
 });
 
 describe("upload_to_matter: the native runtime", () => {
@@ -602,6 +636,36 @@ describe("create_matter", () => {
     const result = await call(handleCreateMatter, { title: "Κυριάκου v Δήμου Λευκωσίας" }, f.deps);
 
     expect(result).toStrictEqual(errorResult("Matter limit reached (10 active matters)."));
+  });
+
+  it("forgets a session the server refuses, and answers with a new sign-in's prompt", async () => {
+    const f = fakes({ created: new ApiError(401, "Authentication required") });
+    const result = await call(handleCreateMatter, { title: "Κυριάκου v Δήμου Λευκωσίας" }, f.deps);
+
+    expect(result).toStrictEqual(SIGN_IN);
+    expect(f.calls).toEqual(["getAccessToken", "createMatter", "forgetSession", "beginSignIn"]);
+  });
+
+  it("keeps the session when there was no token to send, and asks for the call once more", async () => {
+    const f = fakes({ created: new ApiError(401, "not_signed_in") });
+    const result = await call(handleCreateMatter, { title: "Κυριάκου v Δήμου Λευκωσίας" }, f.deps);
+
+    expect(result).toStrictEqual(
+      errorResult("Sign in again: call the tool once more and follow the sign-in instructions."),
+    );
+    expect(f.calls).toEqual(["getAccessToken", "createMatter"]);
+  });
+
+  it("says the matter may not have been opened when DIKIGOROS could not be reached", async () => {
+    const f = fakes({ created: new TypeError("fetch failed") });
+    const result = await call(handleCreateMatter, { title: "Κυριάκου v Δήμου Λευκωσίας" }, f.deps);
+
+    expect(result).toStrictEqual(
+      errorResult(
+        "Could not reach DIKIGOROS (fetch failed). The matter may not have been created; " +
+          "check https://dikigoros.ai/matters before trying again.",
+      ),
+    );
   });
 });
 

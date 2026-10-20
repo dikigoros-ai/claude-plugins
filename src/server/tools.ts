@@ -1,12 +1,13 @@
 // The two tools of the dikigoros-upload server. upload_to_matter lists the files a call names and
 // uploads them into a matter only when a second call confirms the listing; create_matter opens a
 // matter. Both make sure of the sign-in first: with nobody signed in, the result is the prompt of a
-// new device-flow sign-in. A refusal of the API is answered with its sentence (../api/errors). No
-// result carries a token, the device code, an error's metadata or a file's bytes.
+// new device-flow sign-in. A refusal of the API is answered with its sentence (../api/errors), and
+// no answer at all with a sentence saying what was not done. No result carries a token, the device
+// code, an error's metadata or a file's bytes.
 
 import type { CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import type { DikigorosApi } from "../api/client";
+import type { DikigorosApi, Matter } from "../api/client";
 import { ApiError, describeApiError } from "../api/errors";
 import type { AuthSession, SignInPrompt } from "../auth/session";
 import type { HelperConfig } from "../config";
@@ -116,15 +117,15 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
 export async function handleUploadToMatter(args: UploadToMatterArgs, deps: ToolDeps): Promise<CallToolResult> {
   const blocked = await signInGate(deps);
   if (blocked !== null) return blocked;
-  const plan = await deps.resolvePlan(args.paths);
-  if (args.confirm !== true) return listing("confirmation_required", plan);
-  if (args.plan_digest !== undefined && args.plan_digest !== plan.digest) return listing("plan_changed", plan);
-  const uploads = plan.entries.filter((entry) => entry.decision === "upload");
-  if (uploads.length === 0) return answer("Nothing to upload.");
   try {
+    const plan = await deps.resolvePlan(args.paths);
+    if (args.confirm !== true) return listing("confirmation_required", plan);
+    if (args.plan_digest !== undefined && args.plan_digest !== plan.digest) return listing("plan_changed", plan);
+    const uploads = plan.entries.filter((entry) => entry.decision === "upload");
+    if (uploads.length === 0) return answer("Nothing to upload.");
     return await uploadPlanned(args, uploads, deps);
   } catch (err) {
-    return apiFailure(err, deps.config.baseUrl);
+    return failureAfterSignIn(err, deps.config.baseUrl, "Nothing was uploaded; try again in a moment.");
   }
 }
 
@@ -133,27 +134,34 @@ export async function handleCreateMatter(args: CreateMatterArgs, deps: ToolDeps)
   const blocked = await signInGate(deps);
   if (blocked !== null) return blocked;
   const { baseUrl } = deps.config;
+  let matter: Matter;
   try {
-    const matter = await deps.api.createMatter({
+    matter = await deps.api.createMatter({
       title: args.title,
       matterType: args.type,
       caseReference: args.case_reference,
       description: args.description,
     });
-    const url = `${baseUrl}/matters/${matter.id}`;
-    return answer(`Created matter #${matter.id} "${matter.title}" — ${url}`, {
-      matter: {
-        id: matter.id,
-        title: matter.title,
-        matter_type: matter.matterType,
-        case_reference: matter.caseReference,
-        status: matter.status,
-        url,
-      },
-    });
   } catch (err) {
-    return apiFailure(err, baseUrl);
+    // The route refused the token, even a refreshed one: the session is dead. A not_signed_in was
+    // never sent (there was no token), and the next call's sign-in gate starts a sign-in anyway.
+    if (err instanceof ApiError && err.status === 401 && err.code !== "not_signed_in") {
+      return restartSignIn(deps.session);
+    }
+    const undone = `The matter may not have been created; check ${baseUrl}/matters before trying again.`;
+    return failureAfterSignIn(err, baseUrl, undone);
   }
+  const url = `${baseUrl}/matters/${matter.id}`;
+  return answer(`Created matter #${matter.id} "${matter.title}" — ${url}`, {
+    matter: {
+      id: matter.id,
+      title: matter.title,
+      matter_type: matter.matterType,
+      case_reference: matter.caseReference,
+      status: matter.status,
+      url,
+    },
+  });
 }
 
 /**
@@ -162,12 +170,9 @@ export async function handleCreateMatter(args: CreateMatterArgs, deps: ToolDeps)
  */
 async function uploadPlanned(args: UploadToMatterArgs, uploads: PlanEntry[], deps: ToolDeps): Promise<CallToolResult> {
   const { config, session, api } = deps;
+  // A 401 from this allowlisted route, after the client's retry with a refreshed token: the session is dead.
   const me = await api.currentUser().catch(nullOn401);
-  if (me === null) {
-    // An allowlisted route refused even the refreshed token: the session is dead.
-    await session.forgetSession();
-    return startSignIn(session);
-  }
+  if (me === null) return restartSignIn(session);
   if (!me.entitlements.mattersAccess) {
     return failure(describeApiError(new ApiError(403, "entitlement_required"), config.baseUrl));
   }
@@ -242,7 +247,7 @@ function listing(status: "confirmation_required" | "plan_changed", plan: UploadP
     decision: entry.decision,
     reason: entry.reason,
   }));
-  return answer(lines.join("\n"), { status, plan_digest: plan.digest, files });
+  return answer(lines.join("\n"), { status, plan_digest: plan.digest, files, empty_paths: plan.emptyPaths });
 }
 
 /** name · size · type · decision; "—" for a size or a type the entry does not have. */
@@ -269,9 +274,15 @@ async function signInGate({ config, session }: ToolDeps): Promise<CallToolResult
   try {
     token = await session.getAccessToken();
   } catch (err) {
-    return unreachable(err);
+    return signInUnreachable(err);
   }
   return token === null ? startSignIn(session) : null;
+}
+
+/** Forgets a session the server refused even after a refresh, and starts a new sign-in. */
+async function restartSignIn(session: SessionLike): Promise<CallToolResult> {
+  await session.forgetSession();
+  return startSignIn(session);
 }
 
 /** Starts a sign-in, or finds the one in progress, and answers with its prompt for the lawyer. */
@@ -280,7 +291,7 @@ async function startSignIn(session: SessionLike): Promise<CallToolResult> {
   try {
     prompt = await session.beginSignIn();
   } catch (err) {
-    return unreachable(err);
+    return signInUnreachable(err);
   }
   const minutes = Math.floor(prompt.expiresInSeconds / 60);
   return answer(
@@ -296,7 +307,7 @@ async function startSignIn(session: SessionLike): Promise<CallToolResult> {
 }
 
 /** The sign-in service did not answer, or the keychain could not be read: nothing done, nothing lost. */
-function unreachable(err: unknown): CallToolResult {
+function signInUnreachable(err: unknown): CallToolResult {
   return failure(`Could not reach the sign-in service (${firstLine(err)}). Nothing was changed; try again in a moment.`);
 }
 
@@ -306,10 +317,14 @@ function nullOn401(err: unknown): null {
   throw err;
 }
 
-/** An ApiError as an error result with its sentence; any other rejection stands. */
-function apiFailure(err: unknown, baseUrl: string): CallToolResult {
+/**
+ * A rejection after the sign-in gate as an error result: an ApiError's sentence; anything else (no
+ * answer from DIKIGOROS, or from the sign-in service refreshing after a 401) says so with its first
+ * line and what the call left `undone`, never as the SDK's raw error.
+ */
+function failureAfterSignIn(err: unknown, baseUrl: string, undone: string): CallToolResult {
   if (err instanceof ApiError) return failure(describeApiError(err, baseUrl));
-  throw err;
+  return failure(`Could not reach DIKIGOROS (${firstLine(err)}). ${undone}`);
 }
 
 /** A result: `text`, and the same facts as structured content when there are any. */

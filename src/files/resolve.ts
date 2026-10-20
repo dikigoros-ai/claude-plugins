@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { open, readdir, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, sep } from "node:path";
 import { sniffFileKind } from "../extract/sniff";
 
 // Ported from dikigoros-ai/dikigoros-ai lib/matters.ts @ 37f39ac5 (2026-10-19): the one accept list
@@ -23,6 +23,7 @@ export type FileKind = "pdf" | "docx" | "text";
 export type SkipReason =
   | "not_absolute"
   | "not_found"
+  | "unreadable"
   | "not_a_file"
   | "dotfile"
   | "unsupported_type"
@@ -33,7 +34,7 @@ export type SkipReason =
   | "too_many_files";
 
 export interface PlanEntry {
-  /** The path as given; for a file listed from a directory, that directory as given joined with its name. */
+  /** The path as given; for a file listed from a directory, that directory as given followed by its name. */
   path: string;
   /** Where `path` really leads, symlinks resolved; "" when it never resolved. */
   realPath: string;
@@ -41,7 +42,8 @@ export interface PlanEntry {
   name: string;
   /** From `stat`, so a symlink's target; 0 when the path never resolved. */
   sizeBytes: number;
-  /** Set once the extension and the magic bytes check out; null for entries skipped before that. */
+  /** What the accepted extension stands for; null for entries skipped before the extension check
+   *  and for magic bytes that contradict it. */
   kind: FileKind | null;
   decision: "upload" | "skip";
   /** Present exactly when `decision` is "skip". */
@@ -51,23 +53,29 @@ export interface PlanEntry {
 export interface UploadPlan {
   entries: PlanEntry[];
   digest: string;
+  /** Named paths that produced no entry at all, e.g. a folder holding only subfolders or dotfiles. */
+  emptyPaths: string[];
 }
 
 /**
  * The plan for `paths`, in the caller's order. Only absolute paths are taken: the server's working
- * directory is unknown, so nothing is resolved against it. A file stands for itself; a directory
- * for its direct children that are files or symlinks to files (subdirectories are not entered).
- * Every candidate gets the reason of the first check it fails: its real path stays inside the
- * directory that was named (for a named file, the one it sits in); not a dotfile; an accepted
- * extension whose magic bytes agree; not empty; at most MAX_FILE_BYTES; not planned already;
- * within MAX_FILES_PER_CALL. A path that cannot be read (gone, dangling, no permission) is
- * not_found.
+ * directory is unknown, so nothing is resolved against it. A file stands for itself; a directory for
+ * its direct children that are files or symlinks to files, by name, dotfiles omitted (subdirectories
+ * are not entered). A path that leads nowhere is not_found; one that is there but may not be read
+ * (EACCES, EPERM: macOS privacy protection, for one) is unreadable. Every candidate then gets the
+ * reason of the first check it fails: its real path stays inside the directory that was named (for a
+ * named file, the one it sits in); not a dotfile; an accepted extension; not empty; at most
+ * MAX_FILE_BYTES; its first bytes can be read and, for PDF/DOCX, agree with the extension; not
+ * planned already; within MAX_FILES_PER_CALL. A named path that yields no entry is in `emptyPaths`.
  */
 export async function resolveUploadPlan(paths: string[]): Promise<UploadPlan> {
   const entries: PlanEntry[] = [];
+  const emptyPaths: string[] = [];
   const planned = new Set<string>(); // real paths that passed every other check, capped ones included
   for (const path of paths) {
-    for (const entry of await resolvePath(path)) {
+    const resolved = await resolvePath(path);
+    if (resolved.length === 0) emptyPaths.push(path);
+    for (const entry of resolved) {
       if (entry.decision === "skip") {
         entries.push(entry);
       } else if (planned.has(entry.realPath)) {
@@ -79,7 +87,7 @@ export async function resolveUploadPlan(paths: string[]): Promise<UploadPlan> {
       }
     }
   }
-  return { entries, digest: planDigest(entries) };
+  return { entries, digest: planDigest(entries), emptyPaths };
 }
 
 /** sha256 over the sorted "realPath\0sizeBytes" of the upload entries, first 16 hex characters. */
@@ -88,47 +96,62 @@ export function planDigest(entries: PlanEntry[]): string {
   return createHash("sha256").update(uploads.sort().join("\n")).digest("hex").slice(0, 16);
 }
 
-interface Candidate {
-  path: string;
-  sizeBytes: number;
+/** A filesystem call that failed, as the reason its path is skipped: the path leads nowhere (ENOENT,
+ *  ENOTDIR, ELOOP), or it is there but may not be read (EACCES, EPERM and any other code). */
+class FsFailure {
+  readonly reason: "not_found" | "unreadable";
+
+  constructor(err: unknown) {
+    const code = err instanceof Error && "code" in err ? err.code : undefined;
+    this.reason = code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP" ? "not_found" : "unreadable";
+  }
 }
+
+const failure = (err: unknown) => new FsFailure(err);
 
 /** One path as given: the entries of its candidate files, or one entry saying why it has none. */
 async function resolvePath(path: string): Promise<PlanEntry[]> {
   if (!isAbsolute(path)) return [unresolved(path, "not_absolute")];
-  const stats = await stat(path).catch(() => null);
-  if (stats === null) return [unresolved(path, "not_found")];
+  const stats = await stat(path).catch(failure);
+  if (stats instanceof FsFailure) return [unresolved(path, stats.reason)];
   if (!stats.isFile() && !stats.isDirectory()) return [unresolved(path, "not_a_file")];
   // A named file is contained by the directory it sits in; a named directory's files by that directory.
-  const directory = stats.isFile() ? dirname(path) : path;
-  const candidates = stats.isFile() ? [{ path, sizeBytes: stats.size }] : await listFiles(path).catch(() => null);
-  // join, not `+ sep`: a root ("/", "C:\") already ends in a separator.
-  const inside = await realpath(directory).then((real) => join(real, sep), () => null);
-  if (candidates === null || inside === null) return [unresolved(path, "not_found")];
+  const inside = await realpath(stats.isFile() ? dirname(path) : path).then(withTrailingSep, failure);
+  if (inside instanceof FsFailure) return [unresolved(path, inside.reason)];
+  if (stats.isFile()) return [await resolveCandidate(path, stats.size, inside)];
+  return resolveDirectory(path, inside);
+}
+
+/** A named directory's direct children that are files or symlinks to files, sorted by name so the plan
+ *  (and which files the cap leaves out) does not follow the filesystem's listing order. Dotfiles,
+ *  subdirectories and symlinks that lead to a directory or nowhere are omitted without an entry. */
+async function resolveDirectory(directory: string, inside: string): Promise<PlanEntry[]> {
+  const children = await readdir(directory, { withFileTypes: true }).catch(failure);
+  if (children instanceof FsFailure) return [unresolved(directory, children.reason)];
+  const names = children
+    .filter((child) => (child.isFile() || child.isSymbolicLink()) && !child.name.startsWith("."))
+    .map((child) => child.name)
+    .sort();
   const entries: PlanEntry[] = [];
-  for (const candidate of candidates) entries.push(await resolveCandidate(candidate, inside));
+  for (const name of names) {
+    // Concatenated, not path.join: join would collapse a ".." the caller wrote as text, while the OS
+    // resolves it after the symlinks before it.
+    const path = withTrailingSep(directory) + name;
+    const stats = await stat(path).catch(failure);
+    if (stats instanceof FsFailure) {
+      if (stats.reason === "unreadable") entries.push(unresolved(path, "unreadable"));
+    } else if (stats.isFile()) {
+      entries.push(await resolveCandidate(path, stats.size, inside));
+    }
+  }
   return entries;
 }
 
-/** A directory's direct children that are files or symlinks to files, sorted by name so the plan
- *  (and which files the cap leaves out) does not depend on the filesystem's listing order. */
-async function listFiles(directory: string): Promise<Candidate[]> {
-  const children = await readdir(directory, { withFileTypes: true });
-  const names = children.filter((c) => c.isFile() || c.isSymbolicLink()).map((c) => c.name).sort();
-  const files: Candidate[] = [];
-  for (const name of names) {
-    const path = join(directory, name);
-    const stats = await stat(path).catch(() => null); // a symlink may lead to a directory, or nowhere
-    if (stats?.isFile()) files.push({ path, sizeBytes: stats.size });
-  }
-  return files;
-}
-
-/** One candidate file: the first check it fails decides its reason. `inside` is the real path of the
- *  directory that was named, with a trailing separator. */
-async function resolveCandidate({ path, sizeBytes }: Candidate, inside: string): Promise<PlanEntry> {
-  const realPath = await realpath(path).catch(() => null);
-  if (realPath === null) return unresolved(path, "not_found");
+/** One candidate file; the first check it fails decides its reason. `inside` is the real path of the
+ *  directory that was named, ending in a separator. */
+async function resolveCandidate(path: string, sizeBytes: number, inside: string): Promise<PlanEntry> {
+  const realPath = await realpath(path).catch(failure);
+  if (realPath instanceof FsFailure) return unresolved(path, realPath.reason);
   const name = basename(path);
   const skip = (reason: SkipReason, kind: FileKind | null = null): PlanEntry => ({
     path,
@@ -140,24 +163,31 @@ async function resolveCandidate({ path, sizeBytes }: Candidate, inside: string):
     reason,
   });
   if (!realPath.startsWith(inside)) return skip("outside_directory");
-  if (name.startsWith(".")) return skip("dotfile");
+  if (name.startsWith(".")) return skip("dotfile"); // only a file named directly: a listing omits dotfiles
   const kind = kindOf(name);
   if (kind === null) return skip("unsupported_type");
-  if (kind !== "text") {
-    const head = await readHead(realPath).catch(() => null);
-    if (head === null) return skip("not_found");
-    if (sniffFileKind(head) !== kind) return skip("unsupported_type");
-  }
   if (sizeBytes === 0) return skip("empty", kind);
   if (sizeBytes > MAX_FILE_BYTES) return skip("too_large", kind);
+  // Read for every kind, so a file the process may not read is never planned; only PDF/DOCX are sniffed.
+  const head = await readHead(realPath).catch(failure);
+  if (head instanceof FsFailure) return skip(head.reason, kind);
+  if (kind !== "text" && sniffFileKind(head) !== kind) return skip("unsupported_type");
   return { path, realPath, name, sizeBytes, kind, decision: "upload" };
 }
 
-/** The kind an accepted extension claims; null outside the accept list. */
+/** What an accepted extension stands for; null for any other name. */
 function kindOf(name: string): FileKind | null {
-  if (!MATTER_UPLOAD_EXT_RE.test(name)) return null;
-  if (TEXT_DOCUMENT_EXT_RE.test(name)) return "text";
-  return /\.pdf$/i.test(name) ? "pdf" : "docx";
+  switch (MATTER_UPLOAD_EXT_RE.exec(name)?.[1].toLowerCase()) {
+    case "pdf":
+      return "pdf";
+    case "docx":
+      return "docx";
+    case "txt":
+    case "md":
+      return "text";
+    default:
+      return null;
+  }
 }
 
 /** The first 8 bytes (fewer for a shorter file), what sniffFileKind looks at. */
@@ -169,6 +199,11 @@ async function readHead(path: string): Promise<Uint8Array> {
   } finally {
     await file.close();
   }
+}
+
+/** `directory` ending in a separator; a root ("/", "C:\") already does. */
+function withTrailingSep(directory: string): string {
+  return directory.endsWith(sep) ? directory : directory + sep;
 }
 
 /** The entry of a path that led to no file. */

@@ -7,6 +7,9 @@ import { MAX_FILE_BYTES, MAX_FILES_PER_CALL, type PlanEntry, planDigest, resolve
 const PDF = "%PDF-1.7\n%test\n";
 const DOCX = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00]); // the ZIP header every .docx starts with
 
+// Root reads through any permission bits, so a chmod 000 lock does not hold for it.
+const asRoot = process.getuid?.() === 0;
+
 // Each test builds its own tree. `root` is the tree as a caller names it; `realRoot` is where it
 // really is (on macOS os.tmpdir() sits behind the /var -> /private/var symlink, so the two differ).
 let root: string;
@@ -29,6 +32,16 @@ async function put(rel: string, content: string | Uint8Array): Promise<string> {
   return path;
 }
 
+/** Runs `body` with `paths` locked (mode 000), then unlocks them so afterEach can remove the tree. */
+async function withLocked(paths: string[], body: () => Promise<void>): Promise<void> {
+  for (const path of paths) await chmod(path, 0o000);
+  try {
+    await body();
+  } finally {
+    for (const path of paths) await chmod(path, 0o700);
+  }
+}
+
 /** The plan in short, in plan order: "name: upload" or "name: skip (reason)". */
 function decisions(entries: PlanEntry[]): string[] {
   return entries.map((e) => (e.decision === "upload" ? `${e.name}: upload` : `${e.name}: skip (${e.reason})`));
@@ -39,16 +52,17 @@ it("lists the top-level files of a directory, skipping dotfiles and subdirectori
   await put("case/a.docx", DOCX);
   await put("case/notes.MD", "# Σημειώσεις\n");
   await put("case/.DS_Store", "x");
+  await put("case/._b.pdf", "AppleDouble"); // the twin macOS leaves beside a file on a foreign volume
   await put("case/sub/inner.pdf", PDF);
   await put("case/.git/HEAD", "ref: refs/heads/main\n");
   await symlink(join(root, "case", "sub"), join(root, "case", "sub-link.pdf")); // leads to a directory
   await symlink(join(root, "case", "missing.pdf"), join(root, "case", "dangling.pdf")); // leads nowhere
 
-  // Named with a trailing separator, as a folder often is.
+  // Named with a trailing separator, as a folder often is. Dotfiles are not rows at all.
   const { entries } = await resolveUploadPlan([join(root, "case") + sep]);
 
-  expect(decisions(entries)).toEqual([".DS_Store: skip (dotfile)", "a.docx: upload", "b.pdf: upload", "notes.MD: upload"]);
-  expect(entries[1]).toEqual({
+  expect(decisions(entries)).toEqual(["a.docx: upload", "b.pdf: upload", "notes.MD: upload"]);
+  expect(entries[0]).toEqual({
     path: join(root, "case", "a.docx"),
     realPath: join(realRoot, "case", "a.docx"),
     name: "a.docx",
@@ -56,8 +70,8 @@ it("lists the top-level files of a directory, skipping dotfiles and subdirectori
     kind: "docx",
     decision: "upload",
   });
-  expect(entries[2]).toMatchObject({ kind: "pdf", sizeBytes: PDF.length });
-  expect(entries[3]).toMatchObject({ kind: "text" });
+  expect(entries[1]).toMatchObject({ kind: "pdf", sizeBytes: PDF.length });
+  expect(entries[2]).toMatchObject({ kind: "text" });
 });
 
 it("skips a dotfile named directly (dotfile)", async () => {
@@ -66,6 +80,39 @@ it("skips a dotfile named directly (dotfile)", async () => {
   const { entries } = await resolveUploadPlan([draft]);
 
   expect(decisions(entries)).toEqual([".draft.txt: skip (dotfile)"]);
+});
+
+it("a folder holding only subfolders or dotfiles yields no entries and is listed in emptyPaths", async () => {
+  await put("scans/2024/scan-1.pdf", PDF);
+  await put("scans/.DS_Store", "x");
+  const pleading = await put("case/pleading.pdf", PDF);
+
+  const plan = await resolveUploadPlan([join(root, "scans"), pleading, join(root, "missing.pdf")]);
+
+  expect(decisions(plan.entries)).toEqual(["pleading.pdf: upload", "missing.pdf: skip (not_found)"]);
+  expect(plan.emptyPaths).toEqual([join(root, "scans")]);
+});
+
+it("leaves a `..` the caller wrote for the OS to resolve after symlinks (listed paths are not joined)", async () => {
+  await put("matters/2025/case/pleading.pdf", PDF);
+  await mkdir(join(root, "matters", "2025", "archive"));
+  await symlink(join(root, "matters", "2025", "archive"), join(root, "latest"));
+  // The OS reads latest/.. as matters/2025, so this names matters/2025/case; collapsed as text it
+  // would name <root>/case, which does not exist.
+  const named = join(root, "latest") + sep + ".." + sep + "case";
+
+  const { entries } = await resolveUploadPlan([named]);
+
+  expect(entries).toEqual([
+    {
+      path: named + sep + "pleading.pdf",
+      realPath: join(realRoot, "matters", "2025", "case", "pleading.pdf"),
+      name: "pleading.pdf",
+      sizeBytes: PDF.length,
+      kind: "pdf",
+      decision: "upload",
+    },
+  ]);
 });
 
 it("accepts a directly named file and keeps its name verbatim (Greek, spaces)", async () => {
@@ -105,32 +152,58 @@ it("refuses a relative path", async () => {
 });
 
 it("skips a path that does not exist (not_found) and one that is neither a file nor a directory (not_a_file)", async () => {
+  const file = await put("case/a.pdf", PDF);
   await symlink(join(root, "gone.pdf"), join(root, "dangling.pdf"));
+  await symlink(join(root, "loop-b.pdf"), join(root, "loop-a.pdf"));
+  await symlink(join(root, "loop-a.pdf"), join(root, "loop-b.pdf"));
 
-  const { entries } = await resolveUploadPlan([join(root, "missing.pdf"), join(root, "dangling.pdf"), "/dev/null"]);
-
-  expect(entries).toMatchObject([
-    { path: join(root, "missing.pdf"), name: "missing.pdf", decision: "skip", reason: "not_found" },
-    { path: join(root, "dangling.pdf"), name: "dangling.pdf", decision: "skip", reason: "not_found" },
-    { path: "/dev/null", name: "null", decision: "skip", reason: "not_a_file" },
+  const { entries } = await resolveUploadPlan([
+    join(root, "missing.pdf"), // ENOENT
+    join(root, "dangling.pdf"), // ENOENT, through a symlink
+    join(file, "x.pdf"), // ENOTDIR: a file taken for a folder
+    join(root, "loop-a.pdf"), // ELOOP
+    "/dev/null",
   ]);
+
+  expect(decisions(entries)).toEqual([
+    "missing.pdf: skip (not_found)",
+    "dangling.pdf: skip (not_found)",
+    "x.pdf: skip (not_found)",
+    "loop-a.pdf: skip (not_found)",
+    "null: skip (not_a_file)",
+  ]);
+  expect(entries[0].path).toBe(join(root, "missing.pdf"));
 });
 
-// Root reads through any permission bits, so the locks below would not hold for it.
-it.skipIf(process.getuid?.() === 0)("skips a folder or file it may not read (not_found) and plans the rest", async () => {
+it.skipIf(asRoot)("a file or folder the process may not read is `unreadable` (EACCES), while a missing one is `not_found`", async () => {
   const locked = join(root, "locked");
   await put("locked/a.pdf", PDF);
   await put("case/open.pdf", PDF);
   const sealed = await put("case/sealed.pdf", PDF);
-  await chmod(locked, 0o000);
-  await chmod(sealed, 0o000);
-  try {
-    const { entries } = await resolveUploadPlan([locked, join(root, "case")]);
+  await symlink(join(locked, "a.pdf"), join(root, "case", "linked.pdf"));
 
-    expect(decisions(entries)).toEqual(["locked: skip (not_found)", "open.pdf: upload", "sealed.pdf: skip (not_found)"]);
-  } finally {
-    await chmod(locked, 0o700); // so afterEach can remove it
-  }
+  await withLocked([locked, sealed], async () => {
+    const { entries } = await resolveUploadPlan([locked, join(locked, "a.pdf"), join(root, "case"), join(root, "missing.pdf")]);
+
+    expect(decisions(entries)).toEqual([
+      "locked: skip (unreadable)", // its listing is refused
+      "a.pdf: skip (unreadable)", // its folder may not be searched
+      "linked.pdf: skip (unreadable)", // a symlink into that folder
+      "open.pdf: upload",
+      "sealed.pdf: skip (unreadable)", // it may not be opened
+      "missing.pdf: skip (not_found)",
+    ]);
+  });
+});
+
+it.skipIf(asRoot)("a .txt the process may not read is skipped as `unreadable`, not planned for upload", async () => {
+  const sealed = await put("case/sealed.txt", "Σημειώσεις");
+
+  await withLocked([sealed], async () => {
+    const { entries } = await resolveUploadPlan([sealed]);
+
+    expect(decisions(entries)).toEqual(["sealed.txt: skip (unreadable)"]);
+  });
 });
 
 it("skips a file outside the accept list and a file whose magic bytes contradict its .pdf extension (unsupported_type)", async () => {
@@ -164,6 +237,14 @@ it("skips a file over MAX_FILE_BYTES (too_large) and an empty file (empty)", asy
     "over-limit.pdf: skip (too_large)",
   ]);
   expect(entries.map((e) => e.sizeBytes)).toEqual([MAX_FILE_BYTES, 0, MAX_FILE_BYTES + 1]);
+});
+
+it("an empty .pdf is `empty`, not `unsupported_type`", async () => {
+  const blank = await put("case/blank.pdf", "");
+
+  const { entries } = await resolveUploadPlan([blank]);
+
+  expect(decisions(entries)).toEqual(["blank.pdf: skip (empty)"]);
 });
 
 it("skips a symlink whose real path leaves the named directory (outside_directory) and keeps one that stays inside", async () => {
@@ -213,18 +294,17 @@ it("caps the upload list at MAX_FILES_PER_CALL (too_many_files)", async () => {
   const name = (i: number) => `f${String(i).padStart(3, "0")}.txt`;
   for (let i = 0; i <= MAX_FILES_PER_CALL; i++) await put(join("case", name(i)), `file ${i}`);
   await put("case/.hidden.txt", "x");
-  await put("case/zz.doc", "x");
+  await put("case/brief.doc", "x");
 
-  // f000 on its own first, then again through the folder: neither the duplicate nor the skipped
-  // files take a slot, so the one file left over is the last one of the folder.
+  // f000 on its own first, then again through the folder. The dotfile (omitted), the .doc (skipped)
+  // and the duplicate all sort before the cap and take no slot, so the last file of the folder is left over.
   const { entries } = await resolveUploadPlan([join(root, "case", name(0)), join(root, "case")]);
 
   expect(entries.filter((e) => e.decision === "upload")).toHaveLength(MAX_FILES_PER_CALL);
   expect(decisions(entries.filter((e) => e.decision === "skip"))).toEqual([
-    ".hidden.txt: skip (dotfile)",
+    "brief.doc: skip (unsupported_type)",
     "f000.txt: skip (duplicate_path)",
     `${name(MAX_FILES_PER_CALL)}: skip (too_many_files)`,
-    "zz.doc: skip (unsupported_type)",
   ]);
 });
 
@@ -239,7 +319,12 @@ it("digest changes when a planned file's size changes and ignores skipped entrie
   await put("case/c.doc", "legacy");
   await put("case/d.md", "");
   const withSkips = await resolveUploadPlan([join(root, "case")]);
-  expect(withSkips.entries).toHaveLength(5);
+  expect(decisions(withSkips.entries)).toEqual([
+    "a.pdf: upload",
+    "b.txt: upload",
+    "c.doc: skip (unsupported_type)",
+    "d.md: skip (empty)",
+  ]);
   expect(withSkips.digest).toBe(first.digest);
 
   await appendFile(notes, ", amended");

@@ -89,4 +89,4 @@ curl -s -X POST "https://dikigoros-staging.eu.auth0.com/oauth/device/code" \
 
 ## At launch
 
-Repeat steps 2–6 on `dikigoros-prod` with the identifier `https://dikigoros.ai/mcp`, and put that application's Client ID in `plugin.json` before the release that lawyers install.
+Repeat steps 2–6 on `dikigoros-prod` with the identifier `https://dikigoros.ai/mcp`, and put that application's Client ID in `src/config.ts` (`DEFAULT_AUTH0_CLIENT_ID["https://dikigoros.ai"]`), rebuild, and commit before the release that lawyers install.

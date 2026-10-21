@@ -63,16 +63,15 @@ Actions → Library → `add-mcp-claims` → Secrets → `MCP_AUDIENCE` must con
 
 ### 6. Record the client id
 
-Copy the application's **Client ID** (Settings, top of the page). It goes into the plugin manifest in this repository:
+Copy the application's **Client ID** (Settings, top of the page). The manifest carries no environment any more (a manifest value would override the shell for the staging smoke test); the value lives in this repository's `src/config.ts`:
 
-`plugins/dikigoros/.claude-plugin/plugin.json` → `mcpServers` → `dikigoros-upload` → `env`:
+| Where | Key | Value |
+|---|---|---|
+| `src/config.ts` → `DEFAULT_AUTH0_CLIENT_ID` | `"https://dikigoros.ai"` | the **production** application's Client ID (at launch) |
+| `src/config.ts` → `DEFAULT_AUTH0_CLIENT_ID` | `"http://localhost:3000"` | the **staging** application's Client ID (optional; gate 03 can also export `DIKIGOROS_AUTH0_CLIENT_ID` in the shell instead) |
+| `src/config.ts` → `DEFAULT_AUTH0_DOMAIN` | per origin | already `dikigoros-prod.eu.auth0.com` / `dikigoros-staging.eu.auth0.com`; change the production one to `auth.dikigoros.ai` only once that custom domain is what the app's `AUTH0_DOMAIN` uses (it must equal the token issuer the server verifies) |
 
-| Key | Value |
-|---|---|
-| `DIKIGOROS_AUTH0_DOMAIN` | the tenant domain the app's `AUTH0_DOMAIN` uses: staging `dikigoros-staging.eu.auth0.com`; production `dikigoros-prod.eu.auth0.com` (or `auth.dikigoros.ai` once the custom domain is live — it must equal the token issuer the server verifies) |
-| `DIKIGOROS_AUTH0_CLIENT_ID` | the Client ID from this step (production app at launch; for the staging smoke test, set it in the shell environment instead — gate 03 explains) |
-
-Commit it like any other change (a verified commit through the API; it is public information).
+Then `npm run build`, `npm run check`, and commit the source and the rebuilt `plugins/` output together (a verified commit through the API; the client id is public information). `DIKIGOROS_AUTH0_CLIENT_ID` / `DIKIGOROS_AUTH0_DOMAIN` in the environment override these defaults.
 
 ## The check
 

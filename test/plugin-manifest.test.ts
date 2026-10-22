@@ -21,7 +21,7 @@ interface PluginManifest {
   name: string;
   version: string;
   mcpServers: {
-    dikigoros: { type: string; url: string };
+    "dikigoros-ai": { type: string; url: string };
     "dikigoros-upload": { command: string; args: string[] };
   };
 }
@@ -60,8 +60,8 @@ describe("the marketplace and the plugin manifest", () => {
     expect(existsSync(join(PLUGIN_ROOT, "bin"))).toBe(false);
   });
 
-  it("list the remote connector at https://dikigoros.ai/mcp", () => {
-    expect(manifest().mcpServers.dikigoros).toMatchObject({ type: "http", url: "https://dikigoros.ai/mcp" });
+  it("list the remote connector dikigoros-ai at https://dikigoros.ai/mcp", () => {
+    expect(manifest().mcpServers["dikigoros-ai"]).toMatchObject({ type: "http", url: "https://dikigoros.ai/mcp" });
   });
 
   it("start the local server from a file in the plugin", () => {

@@ -2,8 +2,9 @@
 
 The `dikigoros` plugin connects Claude to [DIKIGOROS AI](https://dikigoros.ai). It holds two MCP servers:
 
-- **`dikigoros`**, the remote connector at `https://dikigoros.ai/mcp`: Cyprus case law, legislation and matters. It
-  runs on dikigoros.ai; this repository holds only its address.
+- **`dikigoros-ai`**, the remote connector at `https://dikigoros.ai/mcp` (shown as **dikigoros.ai**; its tools are
+  `mcp__dikigoros-ai__*`): Cyprus case law, legislation and matters. It runs on dikigoros.ai; this repository holds
+  only its address.
 - **`dikigoros-upload`**, the local helper: a Node.js server bundled in this repository
   (`plugins/dikigoros/server/`) that Claude starts on your computer. It uploads files from your computer into a
   DIKIGOROS matter, through the same routes and steps as the uploader on dikigoros.ai. The remote connector cannot do

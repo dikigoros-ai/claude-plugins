@@ -575,7 +575,7 @@ Tool `create_matter` — `title: "Create a matter"`, `inputSchema: z.object({ ti
 ```json
 {
   "name": "dikigoros",
-  "displayName": "DIKIGOROS AI",
+  "displayName": "dikigoros.ai",
   "version": "0.1.0",
   "description": "Cyprus case law, legislation and matters from DIKIGOROS AI, plus a local helper that uploads files from this computer into a matter.",
   "author": { "name": "DIKIGOROS AI", "url": "https://dikigoros.ai" },
@@ -584,7 +584,7 @@ Tool `create_matter` — `title: "Create a matter"`, `inputSchema: z.object({ ti
   "license": "MIT",
   "keywords": ["cyprus", "law", "legal-research", "matters"],
   "mcpServers": {
-    "dikigoros": { "type": "http", "url": "https://dikigoros.ai/mcp" },
+    "dikigoros-ai": { "type": "http", "url": "https://dikigoros.ai/mcp" },
     "dikigoros-upload": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/server/dikigoros-upload.mjs"],

@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "packages": {
+    "@napi-rs/canvas": {
+      "version": "1.0.11",
+      "tarball": "https://registry.npmjs.org/@napi-rs/canvas/-/canvas-1.0.11.tgz",
+      "integrity": "sha512-vt5tog1cr+QKadIddGe+3LrcX0EmjEd0izF717Uwf92mBmgYfq2XRmL2r4bZU40spB69exxhrBn9I91HYEr/7w=="
+    },
+    "@napi-rs/canvas-darwin-arm64": {
+      "version": "1.0.11",
+      "tarball": "https://registry.npmjs.org/@napi-rs/canvas-darwin-arm64/-/canvas-darwin-arm64-1.0.11.tgz",
+      "integrity": "sha512-J/JylWoJTG8OQqZaiqly4IODyAxNofUlZo0wtSBJtHk6AdymbdIkPynAM1JvQaZpPaG5h+msk9QuK8y4i1ooqw=="
+    },
+    "@napi-rs/canvas-darwin-x64": {
+      "version": "1.0.11",
+      "tarball": "https://registry.npmjs.org/@napi-rs/canvas-darwin-x64/-/canvas-darwin-x64-1.0.11.tgz",
+      "integrity": "sha512-nlecCk3xy06eAGC7krZtzNDm9UNTHKuHQYK8ZYegdjzgSL8anGt/eLJZm86OWaNgZkwQwvDqfSmG8Nqe6MPZNQ=="
+    },
+    "@napi-rs/canvas-linux-x64-gnu": {
+      "version": "1.0.11",
+      "tarball": "https://registry.npmjs.org/@napi-rs/canvas-linux-x64-gnu/-/canvas-linux-x64-gnu-1.0.11.tgz",
+      "integrity": "sha512-iDapw7nFSE5tsmQxcH2+KotJhyfVPmHd6vUOQN/Em+8WNbkZJwJ/rDowlJMFnMl0SYSDSfgKCNUGi6Sn5++Smg=="
+    },
+    "@napi-rs/canvas-linux-arm64-gnu": {
+      "version": "1.0.11",
+      "tarball": "https://registry.npmjs.org/@napi-rs/canvas-linux-arm64-gnu/-/canvas-linux-arm64-gnu-1.0.11.tgz",
+      "integrity": "sha512-55sykACGENj5j1rhj+81AO8JbR9HYgGjRZ7/H+pNr4VE1DvINKYNMTcutk8ZmWxk276jAQvUKJ3+Kdj9GXU3lQ=="
+    },
+    "@napi-rs/canvas-win32-x64-msvc": {
+      "version": "1.0.11",
+      "tarball": "https://registry.npmjs.org/@napi-rs/canvas-win32-x64-msvc/-/canvas-win32-x64-msvc-1.0.11.tgz",
+      "integrity": "sha512-DFYp/ZQRdKunI/LPc0UkRXG1vlNjJKOJf8O8Ctb8+wm2Nt2ELg9Eamc31D2VoakkfGo8L+z0Iejz6WtFbQwyGw=="
+    },
+    "@napi-rs/canvas-win32-arm64-msvc": {
+      "version": "1.0.11",
+      "tarball": "https://registry.npmjs.org/@napi-rs/canvas-win32-arm64-msvc/-/canvas-win32-arm64-msvc-1.0.11.tgz",
+      "integrity": "sha512-cUO96IdsfvIj2S+2PNcDSkTcLhjPj8pIOEWRV1Kj70MOP4wnE9zSk7N4C1EKHlFGRcgdR5AkbnBZj0dfHK9nbQ=="
+    },
+    "@napi-rs/keyring": {
+      "version": "2.1.2",
+      "tarball": "https://registry.npmjs.org/@napi-rs/keyring/-/keyring-2.1.2.tgz",
+      "integrity": "sha512-9i1SR6tYeQ3o1beLeVMxhN6Fq513m9TZlTs+46+4JgvSNkaFoW9S4WrpV5MjzE+0CzVoC+dZ4RfZDIgW6+afnQ=="
+    },
+    "@napi-rs/keyring-darwin-arm64": {
+      "version": "2.1.2",
+      "tarball": "https://registry.npmjs.org/@napi-rs/keyring-darwin-arm64/-/keyring-darwin-arm64-2.1.2.tgz",
+      "integrity": "sha512-vsInUWUzWS6/WzR/TFNwmdtmwKWjnnR8TOpvZ/pjjxDAkJB/waz37PWzp2b8AFcw1aCcq2aQ7k2vvbLQy8pTrw=="
+    },
+    "@napi-rs/keyring-darwin-x64": {
+      "version": "2.1.2",
+      "tarball": "https://registry.npmjs.org/@napi-rs/keyring-darwin-x64/-/keyring-darwin-x64-2.1.2.tgz",
+      "integrity": "sha512-wQihYroaQ3r++R6u5c9Gj0TCw1l1F53LCb5aLOXfVvT4DsnDnpe7p7VGYo4/33bLe0iqVevtAj+ET3yKCtOlJQ=="
+    },
+    "@napi-rs/keyring-linux-x64-gnu": {
+      "version": "2.1.2",
+      "tarball": "https://registry.npmjs.org/@napi-rs/keyring-linux-x64-gnu/-/keyring-linux-x64-gnu-2.1.2.tgz",
+      "integrity": "sha512-Fj5TmTnl2oriuCT5DDEYlhgxYes20uGfgOg10LK9PyPVsI8/PQ1m8I4rq/4A5hkrMtY7wvFb70YmX/yPHDYWvQ=="
+    },
+    "@napi-rs/keyring-linux-arm64-gnu": {
+      "version": "2.1.2",
+      "tarball": "https://registry.npmjs.org/@napi-rs/keyring-linux-arm64-gnu/-/keyring-linux-arm64-gnu-2.1.2.tgz",
+      "integrity": "sha512-PM+SAcl/yGzgGbeeCsKrnlG4T5DBIDjmDqtKm5an1bJz0o0gwSzR3BMiXf04JenkcqascZpdcIReoEvLj0cvCw=="
+    },
+    "@napi-rs/keyring-win32-x64-msvc": {
+      "version": "2.1.2",
+      "tarball": "https://registry.npmjs.org/@napi-rs/keyring-win32-x64-msvc/-/keyring-win32-x64-msvc-2.1.2.tgz",
+      "integrity": "sha512-yQtFdfuwqM0ezKlYO6r2n44in2LGzd4MC679Ddhvojip3t1hn+q/4I+gJU+cIJQVd5FAZSKNrK4tGfew3UTpAQ=="
+    },
+    "@napi-rs/keyring-win32-arm64-msvc": {
+      "version": "2.1.2",
+      "tarball": "https://registry.npmjs.org/@napi-rs/keyring-win32-arm64-msvc/-/keyring-win32-arm64-msvc-2.1.2.tgz",
+      "integrity": "sha512-kBq80ZZfjXoa5wHG9kgAVhYYjaPOLgHh5ngt7r1ftwFXPXDPXKH7oM2r2j2Q64cs0pVtmodVtn5Q9e6xCwzQUQ=="
+    }
+  },
+  "platforms": {
+    "darwin-arm64": {
+      "canvas": "@napi-rs/canvas-darwin-arm64",
+      "keyring": "@napi-rs/keyring-darwin-arm64"
+    },
+    "darwin-x64": {
+      "canvas": "@napi-rs/canvas-darwin-x64",
+      "keyring": "@napi-rs/keyring-darwin-x64"
+    },
+    "linux-x64-gnu": {
+      "canvas": "@napi-rs/canvas-linux-x64-gnu",
+      "keyring": "@napi-rs/keyring-linux-x64-gnu"
+    },
+    "linux-arm64-gnu": {
+      "canvas": "@napi-rs/canvas-linux-arm64-gnu",
+      "keyring": "@napi-rs/keyring-linux-arm64-gnu"
+    },
+    "win32-x64-msvc": {
+      "canvas": "@napi-rs/canvas-win32-x64-msvc",
+      "keyring": "@napi-rs/keyring-win32-x64-msvc"
+    },
+    "win32-arm64-msvc": {
+      "canvas": "@napi-rs/canvas-win32-arm64-msvc",
+      "keyring": "@napi-rs/keyring-win32-arm64-msvc"
+    }
+  }
+}

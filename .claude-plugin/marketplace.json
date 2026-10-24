@@ -1,0 +1,16 @@
+{
+  "name": "dikigoros-ai",
+  "description": "DIKIGOROS AI plugins for Claude",
+  "owner": { "name": "DIKIGOROS AI", "url": "https://dikigoros.ai" },
+  "metadata": { "version": "0.1.0" },
+  "plugins": [
+    {
+      "name": "dikigoros",
+      "source": "./plugins/dikigoros",
+      "description": "Cyprus case law, legislation and matters from DIKIGOROS AI, plus a local helper that uploads files from this computer into a matter.",
+      "version": "0.1.0",
+      "category": "legal",
+      "tags": ["cyprus", "law", "matters"]
+    }
+  ]
+}

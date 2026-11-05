@@ -6,3 +6,4 @@ dist/
 *.local
 authorized_tokens.json
 .superpowers/
+ui-harness-out/

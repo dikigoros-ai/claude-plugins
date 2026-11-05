@@ -76,6 +76,11 @@ export interface DocumentOutcome {
    * Not there for a duplicate, which keeps its own.
    */
   roleApplied?: boolean;
+  /**
+   * A PDF's or a DOCX's SHA-256 (64 hex characters), on every outcome once its bytes were read and
+   * hashed. Not there for a text document, whose normalised text the server hashes itself.
+   */
+  sha256?: string;
 }
 
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -122,6 +127,8 @@ class DocumentUpload {
   #route = "";
   #documentId: number | undefined;
   #roleApplied: boolean | undefined;
+  /** A PDF's or a DOCX's hash, once its bytes are read. */
+  #sha256: string | undefined;
 
   constructor(name: string, ctx: UploadContext, deps: UploadDeps) {
     this.#name = name;
@@ -139,6 +146,7 @@ class DocumentUpload {
     const put = (pathname: string, body: Uint8Array, contentType: BlobContentType) =>
       this.#call("POST", tokenPath, () => uploadBlob({ api, matterId, pathname, bytes: body, contentType }));
     const sha256 = createHash("sha256").update(bytes).digest("hex");
+    this.#sha256 = sha256;
     const mimeType = kind === "pdf" ? "application/pdf" : DOCX_MIME;
     // Taken before the bytes go anywhere: an extractor may take over the buffer it is handed (pdf.js does).
     const facts = { sizeBytes: bytes.byteLength, sha256, headBytesBase64: headBytesBase64(bytes) };
@@ -328,7 +336,8 @@ class DocumentUpload {
 
   /**
    * The outcome: the document's id as far as known, whether a role or a side given was applied to a
-   * document this upload made or resumed (false unless the PATCH took it), then `fields`. A failure
+   * document this upload made or resumed (false unless the PATCH took it), the file's hash once it
+   * was taken, then `fields`. A failure
    * always says why: its code, when there is no sentence for it.
    */
   #outcome(status: OutcomeStatus, fields: Omit<DocumentOutcome, "name" | "status"> = {}): DocumentOutcome {
@@ -336,7 +345,7 @@ class DocumentUpload {
     const owed = (role !== undefined || side !== undefined) && this.#documentId !== undefined && status !== "duplicate";
     const roleApplied = owed ? (this.#roleApplied ?? false) : undefined;
     const message = fields.message ?? (status === "failed" ? fields.code : undefined);
-    const known = { documentId: this.#documentId, roleApplied, ...fields, message };
+    const known = { documentId: this.#documentId, roleApplied, ...fields, message, sha256: this.#sha256 };
     const defined = Object.fromEntries(Object.entries(known).filter(([, value]) => value !== undefined));
     return { name: this.#name, status, ...(defined as typeof fields) };
   }

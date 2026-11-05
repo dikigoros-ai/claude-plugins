@@ -10,11 +10,11 @@ The `dikigoros` plugin connects Claude to [DIKIGOROS AI](https://dikigoros.ai). 
   DIKIGOROS matter, through the same routes and steps as the uploader on dikigoros.ai. The remote connector cannot do
   this: MCP has no channel for files.
 
-> **0.1.0 is not live yet.** It needs the main app's PR 1 deployed on dikigoros.ai: the routes the helper calls exist
-> only with it. Until the DIKIGOROS Auth0 application exists and its client id is set in `src/config.ts`, the helper
-> answers every tool call with "The helper is not configured (DIKIGOROS_AUTH0_CLIENT_ID is empty)." That is expected
-> in this release. Uploads of `.txt` and `.md` files, and roles and sides, also wait for dikigoros.ai to accept the
-> helper's sign-in on two more routes, the main app's PR 4 ([docs/assumed-routes.md](docs/assumed-routes.md)).
+> **Not live yet.** Until the DIKIGOROS Auth0 application exists and its client id is set in `src/config.ts`, the
+> helper answers every tool call with "The helper is not configured (DIKIGOROS_AUTH0_CLIENT_ID is empty)." That is
+> expected. Uploads of `.txt` and `.md` files also wait for dikigoros.ai to accept the helper's sign-in on the text
+> route (the main app's allowlist fix); roles and sides are not set by the helper
+> ([docs/assumed-routes.md](docs/assumed-routes.md)).
 
 ## Install
 
@@ -66,6 +66,35 @@ with musl (Alpine, for one) is not supported.
 |---|---|---|
 | `upload_to_matter` | `matter_id`; `paths`: 1 to 50 absolute paths of files or folders; optional `role`, `side`, `confirm`, `plan_digest` | Lists the files the paths name; with `confirm: true`, uploads them into the matter |
 | `create_matter` | `title`; optional `type` (`civil`, `criminal`, `interim_application`, `appeal`, `other`), `case_reference`, `description` | Creates a matter and answers with its number and link |
+| `scan_project` | `root`: the absolute path of a project folder | Lists the folder and its subfolders on this computer, with the plan's limits; sends nothing about the files |
+| `show_project_picker` | `scan_id`; optional proposed `matter` fields and `preselect` paths | Opens the file picker in the conversation, where the host can show it |
+| `init_matter` | `selection_id` and `digest` from the picker; or `root`, `relative_paths`, optional `matter`, `confirm`, `plan_digest` | Opens the new matter (or uses the folder's linked one), links the folder, uploads the files |
+
+Two more tools, `load_picker` and `save_selection`, serve the picker itself: the host lists them to the picker only,
+never to the model.
+
+### Setting a project folder up as a matter
+
+Ask Claude to set a folder up as a DIKIGOROS matter, or run **`/dikigoros:init-matter [folder]`**. The plugin's
+`init-matter` skill then:
+
+1. scans the folder with `scan_project`, subfolders included (hidden files, `node_modules`, `__MACOSX` and Office lock
+   files are left out);
+2. proposes the matter's title (from the folder's name), and its type and case reference when the file names make
+   them evident, and preselects the core documents — pleadings, affidavits, orders and judgments first, drafts and old
+   versions left out — up to what the matter can take;
+3. opens the **picker**: the matter's fields to edit, the folder's tree with a box per file and per folder, the
+   files that cannot be uploaded greyed with the reason, and a counter of the selection against the limit. Ticking
+   past the limit is refused. **Create matter & upload** sends the selection to Claude, which runs `init_matter`;
+4. where the picker cannot be shown (the Claude Code terminal), does the same in the chat: the proposal, a summary per
+   folder, your changes, a listing, and the upload only after your yes.
+
+`init_matter` creates the matter, writes **`.dikigoros/matter.json`** in the folder (the matter's number, title and
+link, and each uploaded file's path, size, SHA-256 and document number) before the first upload, then uploads the
+files and adds each one to that file. Running the skill again in the same folder offers only the files not yet
+uploaded, into the same matter. Two files with the same name in different subfolders are stored as `Name.pdf` and
+`Name (2).pdf`. If the folder is a git repository, add `.dikigoros/` to its `.gitignore`: the file names a client
+matter.
 
 ### The confirm step
 
@@ -130,7 +159,9 @@ call left unfinished is picked up where it stopped rather than reported as a dup
 
 `role` and `side`, when given, apply to every file of the call. They are set after processing finishes, once the
 server has made its own suggestion, which they then override; if the server refuses to set them, the result says
-`role_applied: false`. The upload goes on whatever the server answers: the file stays uploaded and processed. A
+`role_applied: false`. **dikigoros.ai does not accept the helper's sign-in on the route that sets them** (a
+deliberate choice: no document changes through the connector), so for now every call answers `role_applied: false`
+and the server's own suggestion stands; change it on the matter page. The upload goes on whatever the server answers: the file stays uploaded and processed. A
 document still processing when the call ends is left without them (`role_applied: false`). A file already in the
 matter keeps its own, unless an earlier call left it unfinished: then it gets them once its processing finishes.
 
@@ -183,6 +214,8 @@ the stored refresh token, the helper deletes the entry itself and answers with a
 | Token refresh: when the access token has a minute or less left, or dikigoros.ai refused it | The client id and the refresh token | The Auth0 tenant |
 | The first tool call, until the native components are installed | Requests for the pinned packages; what comes back is checked against the committed lock | registry.npmjs.org |
 | `create_matter` | The title, type, case reference and description | `https://dikigoros.ai` |
+| `scan_project`, `show_project_picker`, the picker | Nothing about the files: only the account and the matters are read | `https://dikigoros.ai` |
+| `init_matter` | The matter's fields; then, for each file, what `upload_to_matter` with `confirm: true` sends (below) | `https://dikigoros.ai` and the blob store |
 | `upload_to_matter` with `confirm: true` | Each PDF's and DOCX's bytes, and the JPEG of each page that needs OCR (scanned pages), under the pathname `matters/u<userId>/m<matterId>/<file name>` (a page's: `…/pages/p<n>.jpg`): the file name and the ids are the blob's name | The DIKIGOROS private blob store (Vercel Blob, EU), straight from this computer |
 | `upload_to_matter` with `confirm: true` | Each file's name, size, SHA-256 and first 8 bytes; its extracted text (the manifest); a `.txt` or `.md` file's text; the role and side, when given | `https://dikigoros.ai` |
 
@@ -222,7 +255,9 @@ another project, they would send the files and their upload tokens somewhere oth
   read, and a listing names at most 25 skipped files, counting the others by reason.
 - A call that has run for 20 minutes starts no further file; the next call picks up where it stopped.
 - Paths must be absolute: a relative path, or one starting with `~`, is skipped (`not_absolute`).
-- A folder stands for the files directly in it: subfolders are not entered.
+- `upload_to_matter`: a folder stands for the files directly in it: subfolders are not entered.
+- `scan_project`: subfolders are entered down to 8 levels, and at most 5,000 files and folders are looked at; past
+  either, the scan says it is partial. The home directory, a folder holding it, and a drive's root are refused.
 - Dotfiles are skipped: a folder's are left out of the listing, and one named directly is listed as skipped.
 - A file whose real path, links followed, leads out of the folder that was named (for a file named directly, the
   folder it is in) is skipped.

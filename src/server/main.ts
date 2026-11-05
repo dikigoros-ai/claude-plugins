@@ -1,5 +1,5 @@
-// The dikigoros-upload MCP server: JSON-RPC over stdio to the plugin's host, its two tools (./tools)
-// over the sign-in (../auth), the REST client (../api) and the document pipeline (../pipeline). The
+// The dikigoros-upload MCP server: JSON-RPC over stdio to the plugin's host, its 0.1.0 tools (./tools)
+// and the init-matter tools with the project picker's ui:// resource (./init-tools), over the sign-in (../auth), the REST client (../api) and the document pipeline (../pipeline). The
 // native packages, canvas for scanned pages and keyring for the OS keychain, are installed on first
 // use into the plugin's data directory, unless DIKIGOROS_HELPER_NATIVE_DIR names a node_modules that
 // holds them. `node dikigoros-upload.mjs --extract-check <file>` starts no server: it extracts the
@@ -9,6 +9,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
+import { getUiCapability, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { uploadBlob } from "../api/blob-upload";
@@ -20,14 +21,18 @@ import { ConfigError, type HelperConfig, loadConfig } from "../config";
 import { extractDocx } from "../extract/docx";
 import { extractPdf } from "../extract/pdf";
 import { resolveUploadPlan } from "../files/resolve";
+import { scanProject } from "../files/scan";
+import { readLink, writeLink } from "../link/link-file";
 import { ensureNativeRuntime, readNativeLock } from "../native/install";
 import { loadCanvasModule, loadKeyringBinding } from "../native/load";
 import lock from "../native/lock.generated.json" with { type: "json" };
 import { platformKey } from "../native/platform";
 import { uploadDocument, type UploadDeps } from "../pipeline/upload-document";
-import { resolveAssets } from "./assets";
+import { resolvePickerHtml, resolveAssets } from "./assets";
+import { registerInitTools } from "./init-tools";
 import { once } from "./lazy";
 import { isSupportedNode } from "./node-version";
+import { SelectionStore } from "./selections";
 import { registerTools, type ToolDeps } from "./tools";
 
 /** The plugin's version, defined by the build (scripts/build.ts); not defined when run from source. */
@@ -140,10 +145,28 @@ function serve(): void {
     tokenStoreWarning: async () => (await store()).warning,
     now: Date.now,
   };
+  // One store of scans and selections for the process, so a selection the picker saved on one
+  // connection is there for init_matter on another; the picker's HTML is read once.
+  const selections = new SelectionStore({ now: Date.now });
+  const pickerHtml = once(() => readFile(resolvePickerHtml(import.meta.url), "utf8"));
   const version = typeof PLUGIN_VERSION === "string" ? PLUGIN_VERSION : "dev";
   serveStdio(() => {
     const server = new McpServer({ name: "dikigoros-upload", version });
+    // Whether this connection's client shows MCP Apps, known once it has initialized.
+    let uiSupported = false;
+    server.server.oninitialized = () => {
+      uiSupported = getUiCapability(server.server.getClientCapabilities())?.mimeTypes?.includes(RESOURCE_MIME_TYPE) === true;
+    };
     registerTools(server, deps);
+    registerInitTools(server, {
+      ...deps,
+      scanProject,
+      links: { read: readLink, write: writeLink },
+      selections,
+      homeDir: homedir(),
+      pickerHtml,
+      uiSupported: () => uiSupported,
+    });
     return server;
   });
 }

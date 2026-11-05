@@ -19,3 +19,8 @@ export function resolveAssets(bundleUrl: string): PdfAssets {
     standardFontDataUrl: directory("standard_fonts"),
   };
 }
+
+/** The project picker widget's HTML beside the bundle at `bundleUrl`, built into ui/ (scripts/build.ts). */
+export function resolvePickerHtml(bundleUrl: string): string {
+  return join(dirname(fileURLToPath(bundleUrl)), "ui", "project-picker.html");
+}

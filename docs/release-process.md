@@ -48,7 +48,17 @@ claude plugin validate ./plugins/dikigoros
 claude plugin validate .
 ```
 
-`npm run build` regenerates `plugins/dikigoros/server/`: the bundle, its licence notices (the licence comments
+Then look at the picker as a host shows it:
+
+```
+npx tsx scripts/ui-harness.ts
+```
+
+It screenshots the built picker in Chromium and WebKit, at 375 and 768 px, in English and Greek, light and dark, for
+a new matter and a linked folder, into `ui-harness-out/`. Look at every one; a browser it cannot launch fails the run
+(it needs Playwright and both browsers installed locally, see the script's header).
+
+`npm run build` regenerates `plugins/dikigoros/server/`: the bundle, the picker's HTML (`ui/project-picker.html`), its licence notices (the licence comments
 esbuild keeps, and `THIRD_PARTY_NOTICES.md`: pdf.js's own notice and the licence of every package the bundle holds
 code of), and pdf.js's worker, wasm decoders and standard fonts. The same inputs give the same bytes. `npm run check`
 runs lint, the typecheck and the tests; the smoke test starts the bundle just built.

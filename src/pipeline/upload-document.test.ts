@@ -272,7 +272,14 @@ describe("uploadDocument: a PDF or a DOCX", () => {
       [7, 31],
     ]);
     expect(f.log.mock.calls).toEqual([["claim.pdf: OCR, 1 page(s) remaining"]]);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 1 });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "ready",
+      documentId: 31,
+      pageCount: 2,
+      ocrPages: 1,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("registers a DOCX with its whole text as the manifest", async () => {
@@ -311,6 +318,7 @@ describe("uploadDocument: a PDF or a DOCX", () => {
       documentId: 31,
       pageCount: 1,
       ocrPages: 0,
+      sha256: DOCX_SHA256,
     });
   });
 
@@ -332,6 +340,7 @@ describe("uploadDocument: a PDF or a DOCX", () => {
       status: "failed",
       code: "no_text_extracted",
       message: "No readable text found — the pages appear to be blank",
+      sha256: PDF_SHA256,
     });
   });
 
@@ -373,7 +382,14 @@ describe("uploadDocument: a PDF or a DOCX", () => {
         { page: 2, text: "Ο ενάγων ζητά την απόδοση του μισθίου.", needsOcr: false },
       ],
     });
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "ready",
+      documentId: 31,
+      pageCount: 2,
+      ocrPages: 0,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("keeps a scanned page that rendered blank as needing OCR, beside one that rendered ink", async () => {
@@ -403,14 +419,28 @@ describe("uploadDocument: a PDF or a DOCX", () => {
         { page: 2, text: "", needsOcr: true },
       ],
     });
-    expect(outcome).toStrictEqual({ name: "scan.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 2 });
+    expect(outcome).toStrictEqual({
+      name: "scan.pdf",
+      status: "ready",
+      documentId: 31,
+      pageCount: 2,
+      ocrPages: 2,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("registers a PDF without pages as it is, as the browser does", async () => {
     const f = fakes({ extractPdf: [{ pages: [], images: new Map() }], process: [ready(0)] });
     const outcome = await uploadDocument(planned("empty.pdf", "pdf"), CTX, f.deps);
     expect(f.api.ingest.mock.calls).toStrictEqual([[7, 31, { kind: "pdf", pages: [] }]]);
-    expect(outcome).toStrictEqual({ name: "empty.pdf", status: "ready", documentId: 31, pageCount: 0, ocrPages: 0 });
+    expect(outcome).toStrictEqual({
+      name: "empty.pdf",
+      status: "ready",
+      documentId: 31,
+      pageCount: 0,
+      ocrPages: 0,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("uploads every rendered page of a scan, and leaves it processing once maxWaitMs has passed", async () => {
@@ -458,6 +488,7 @@ describe("uploadDocument: a PDF or a DOCX", () => {
       documentId: 31,
       ocrRemaining: 1,
       message: STILL_PROCESSING,
+      sha256: PDF_SHA256,
     });
   });
 
@@ -475,13 +506,21 @@ describe("uploadDocument: a PDF or a DOCX", () => {
       documentId: 31,
       ocrRemaining: 40,
       message: STILL_PROCESSING,
+      sha256: PDF_SHA256,
     });
   });
 
   it("takes the page count it knows when the ready answer carries no document", async () => {
     const f = fakes({ process: [{ status: "ready", ocrRemaining: 0 }] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "ready",
+      documentId: 31,
+      pageCount: 2,
+      ocrPages: 0,
+      sha256: PDF_SHA256,
+    });
   });
 });
 
@@ -492,7 +531,14 @@ describe("uploadDocument: the poll", () => {
 
     expect(f.calls.slice(-4)).toEqual(["ingest", "process", "sleep(1500)", "process"]);
     expect(f.log).not.toHaveBeenCalled();
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "ready",
+      documentId: 31,
+      pageCount: 2,
+      ocrPages: 0,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("logs the OCR count only when it changes, and finalizing once it is 0, and reports the same as progress", async () => {
@@ -517,7 +563,14 @@ describe("uploadDocument: the poll", () => {
     const f = fakes({ process: [processing(1), blip, ready(2)] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
     expect(f.calls.slice(-6)).toEqual(["ingest", "process", "sleep(1500)", "process", "sleep(1500)", "process"]);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 31, pageCount: 2, ocrPages: 0 });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "ready",
+      documentId: 31,
+      pageCount: 2,
+      ocrPages: 0,
+      sha256: PDF_SHA256,
+    });
   });
 
   const unavailable = () => new ApiError(503, "http_503");
@@ -533,7 +586,14 @@ describe("uploadDocument: the poll", () => {
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, { ...f.deps, maxWaitMs: 3000 });
     // At 0, 1.5, 3 and 4.5 s: past 3 s after the fourth poll. The count is the last one answered.
     expect(f.api.process).toHaveBeenCalledTimes(4);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "processing", documentId: 31, ocrRemaining: 2, message });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "processing",
+      documentId: 31,
+      ocrRemaining: 2,
+      message,
+      sha256: PDF_SHA256,
+    });
   });
 
   it.each([
@@ -549,7 +609,14 @@ describe("uploadDocument: the poll", () => {
 
     expect(f.api.process).toHaveBeenCalledTimes(2);
     expect(f.sleep).toHaveBeenCalledTimes(1);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", documentId: 31, code: quota.code, message });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "failed",
+      documentId: 31,
+      code: quota.code,
+      message,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("ends on any other 409 from the poll", async () => {
@@ -562,6 +629,7 @@ describe("uploadDocument: the poll", () => {
       documentId: 31,
       code: "Document is not processing",
       message: "409 Document is not processing",
+      sha256: PDF_SHA256,
     });
   });
 
@@ -579,7 +647,7 @@ describe("uploadDocument: the poll", () => {
   ])("reports a failed processing with its code: %j", async (result, expected) => {
     const f = fakes({ process: [processing(3), result] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", documentId: 31, ...expected });
+    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", documentId: 31, ...expected, sha256: PDF_SHA256 });
   });
 });
 
@@ -602,6 +670,7 @@ describe("uploadDocument: a file already in the matter", () => {
       status: "duplicate",
       documentId: 12,
       message: "This file is already in the matter (document #12).",
+      sha256: PDF_SHA256,
     });
   });
 
@@ -616,7 +685,14 @@ describe("uploadDocument: a file already in the matter", () => {
       [7, 12],
     ]);
     expect(f.api.patchDocument.mock.calls).toStrictEqual([[7, 12, { role: "exhibit" }]]);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "ready", documentId: 12, pageCount: 2, roleApplied: true });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "ready",
+      documentId: 12,
+      pageCount: 2,
+      roleApplied: true,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("ingests the manifest it built into a pending twin, then polls it", async () => {
@@ -663,6 +739,7 @@ describe("uploadDocument: a file already in the matter", () => {
       pageCount: 2,
       ocrPages: 1,
       roleApplied: true,
+      sha256: PDF_SHA256,
     });
   });
 
@@ -679,20 +756,33 @@ describe("uploadDocument: a file already in the matter", () => {
       status: "duplicate",
       documentId: 12,
       message: "This file is already in the matter (document #12).",
+      sha256: PDF_SHA256,
     });
   });
 
   it("fails when the twin's read gets no answer", async () => {
     const f = fakes({ createDocument: [duplicateOf(12)], getDocument: [new TypeError("fetch failed")] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", documentId: 12, code: "network", message: "fetch failed" });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "failed",
+      documentId: 12,
+      code: "network",
+      message: "fetch failed",
+      sha256: PDF_SHA256,
+    });
   });
 
   it("reports a duplicate without an id when the refusal names no twin", async () => {
     const f = fakes({ createDocument: [new ApiError(409, "duplicate_document")] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
     expect(f.api.getDocument).not.toHaveBeenCalled();
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "duplicate", message: "This file is already in the matter." });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "duplicate",
+      message: "This file is already in the matter.",
+      sha256: PDF_SHA256,
+    });
   });
 
   it("resumes the processing twin of a text document", async () => {
@@ -726,6 +816,7 @@ describe("uploadDocument: role and side", () => {
       pageCount: 2,
       ocrPages: 0,
       roleApplied: true,
+      sha256: PDF_SHA256,
     });
   });
 
@@ -749,6 +840,7 @@ describe("uploadDocument: role and side", () => {
       pageCount: 2,
       ocrPages: 0,
       roleApplied: false,
+      sha256: PDF_SHA256,
     });
   });
 
@@ -770,7 +862,7 @@ describe("uploadDocument: role and side", () => {
       const outcome = await uploadDocument(planned("claim.pdf", "pdf"), { ...CTX, side: "ours" }, { ...f.deps, maxWaitMs: 3000 });
 
       expect(f.api.patchDocument).not.toHaveBeenCalled();
-      expect(outcome).toStrictEqual({ name: "claim.pdf", documentId: 31, ...ended, roleApplied: false });
+      expect(outcome).toStrictEqual({ name: "claim.pdf", documentId: 31, ...ended, roleApplied: false, sha256: PDF_SHA256 });
     },
   );
 
@@ -784,6 +876,7 @@ describe("uploadDocument: role and side", () => {
       status: "duplicate",
       documentId: 12,
       message: "This file is already in the matter (document #12).",
+      sha256: PDF_SHA256,
     });
   });
 
@@ -853,26 +946,39 @@ describe("uploadDocument: failures", () => {
       status: "failed",
       code: "document_limit_reached",
       message: "Document limit reached (10 per matter).",
+      sha256: PDF_SHA256,
     });
   });
 
   const refused = () => new ApiError(401, "Authentication required");
   it.each([
-    ["the blob token", planned("claim.pdf", "pdf"), { uploadBlob: [refused()] }, "POST /api/matters/7/documents/upload", {}],
-    ["the create", planned("claim.pdf", "pdf"), { createDocument: [refused()] }, "POST /api/matters/7/documents", {}],
+    [
+      "the blob token",
+      planned("claim.pdf", "pdf"),
+      { uploadBlob: [refused()] },
+      "POST /api/matters/7/documents/upload",
+      { sha256: PDF_SHA256 },
+    ],
+    [
+      "the create",
+      planned("claim.pdf", "pdf"),
+      { createDocument: [refused()] },
+      "POST /api/matters/7/documents",
+      { sha256: PDF_SHA256 },
+    ],
     [
       "the ingest",
       planned("claim.pdf", "pdf"),
       { ingest: [refused()] },
       "POST /api/matters/7/documents/31/ingest",
-      { documentId: 31 },
+      { documentId: 31, sha256: PDF_SHA256 },
     ],
     [
       "a poll",
       planned("claim.pdf", "pdf"),
       { process: [processing(1), refused()] },
       "POST /api/matters/7/documents/31/process",
-      { documentId: 31 },
+      { documentId: 31, sha256: PDF_SHA256 },
     ],
     [
       "the text create",
@@ -888,7 +994,7 @@ describe("uploadDocument: failures", () => {
       "POST /api/matters/7/documents/text",
       {},
     ],
-  ] satisfies Array<[string, PlanEntry, Answers, string, { documentId?: number }]>)(
+  ] satisfies Array<[string, PlanEntry, Answers, string, { documentId?: number; sha256?: string }]>)(
     "names the route when %s is refused after the client's retry (401)",
     async (_step, entry, answers, route, known) => {
       const f = fakes(answers);
@@ -912,6 +1018,7 @@ describe("uploadDocument: failures", () => {
       documentId: 31,
       code: "not_signed_in",
       message: "Sign in again: call the tool once more and follow the sign-in instructions.",
+      sha256: PDF_SHA256,
     });
   });
 
@@ -921,7 +1028,13 @@ describe("uploadDocument: failures", () => {
   ])("adds the store's own message to a failed blob upload: %j", async (metadata, message) => {
     const f = fakes({ uploadBlob: [new ApiError(502, "blob_upload_failed", metadata)] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", code: "blob_upload_failed", message });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "failed",
+      code: "blob_upload_failed",
+      message,
+      sha256: PDF_SHA256,
+    });
   });
 
   it("keeps the error's metadata out of the message", async () => {
@@ -932,6 +1045,7 @@ describe("uploadDocument: failures", () => {
       status: "failed",
       code: "email_not_verified",
       message: "Verify this DIKIGOROS account's email address first, then try again.",
+      sha256: PDF_SHA256,
     });
   });
 
@@ -944,7 +1058,13 @@ describe("uploadDocument: failures", () => {
   });
 
   it.each([
-    ["a corrupt PDF", planned("claim.pdf", "pdf"), { extractPdf: [new Error("Invalid PDF structure.")] }, "Invalid PDF structure."],
+    [
+      "a corrupt PDF",
+      planned("claim.pdf", "pdf"),
+      { extractPdf: [new Error("Invalid PDF structure.")] },
+      "Invalid PDF structure.",
+      PDF_SHA256,
+    ],
     [
       "a zip that is not a DOCX",
       planned("υπεράσπιση.docx", "docx"),
@@ -953,21 +1073,28 @@ describe("uploadDocument: failures", () => {
         extractDocx: [new Error("Could not find main document part. Are you sure this is a valid .docx file?")],
       },
       "Could not find main document part. Are you sure this is a valid .docx file?",
+      DOCX_SHA256,
     ],
-  ] satisfies Array<[string, PlanEntry, Answers, string]>)(
+  ] satisfies Array<[string, PlanEntry, Answers, string, string]>)(
     "reports %s as extraction_failed, before anything is registered",
-    async (_what, entry, answers, message) => {
+    async (_what, entry, answers, message, sha256) => {
       const f = fakes(answers);
       const outcome = await uploadDocument(entry, CTX, f.deps);
       expect(f.api.createDocument).not.toHaveBeenCalled();
-      expect(outcome).toStrictEqual({ name: entry.name, status: "failed", code: "extraction_failed", message });
+      expect(outcome).toStrictEqual({ name: entry.name, status: "failed", code: "extraction_failed", message, sha256 });
     },
   );
 
   it("reports a request that got no answer as network, with the first line of its error", async () => {
     const f = fakes({ createDocument: [new TypeError("fetch failed\n    at node:internal/deps/undici/undici:13510:13")] });
     const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
-    expect(outcome).toStrictEqual({ name: "claim.pdf", status: "failed", code: "network", message: "fetch failed" });
+    expect(outcome).toStrictEqual({
+      name: "claim.pdf",
+      status: "failed",
+      code: "network",
+      message: "fetch failed",
+      sha256: PDF_SHA256,
+    });
   });
 
   it("does not read an entry the plan skips", async () => {
@@ -976,5 +1103,51 @@ describe("uploadDocument: failures", () => {
     const outcome = await uploadDocument(entry, CTX, f.deps);
     expect(f.calls).toEqual([]);
     expect(outcome).toStrictEqual({ name: "huge.pdf", status: "skipped", code: "too_large" });
+  });
+});
+
+describe("uploadDocument: the file's SHA-256", () => {
+  const HEX64 = /^[0-9a-f]{64}$/;
+
+  it("carries the hash of a PDF's bytes on its outcome", async () => {
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, fakes().deps);
+    expect(outcome.status).toBe("ready");
+    expect(outcome.sha256).toMatch(HEX64);
+    expect(outcome.sha256).toBe(PDF_SHA256);
+  });
+
+  it("carries the hash of a DOCX's bytes on its outcome", async () => {
+    const f = fakes({ readFile: [DOCX_BYTES] });
+    const outcome = await uploadDocument(planned("υπεράσπιση.docx", "docx"), CTX, f.deps);
+    expect(outcome.status).toBe("ready");
+    expect(outcome.sha256).toMatch(HEX64);
+    expect(outcome.sha256).toBe(DOCX_SHA256);
+  });
+
+  it("carries the hash on a duplicate's outcome and on a resumed twin's", async () => {
+    const duplicate = fakes({ createDocument: [duplicateOf(12)], getDocument: [twin("ready")] });
+    const resumed = fakes({ createDocument: [duplicateOf(12)], getDocument: [twin("processing")] });
+    const outcomes = [
+      await uploadDocument(planned("claim.pdf", "pdf"), CTX, duplicate.deps),
+      await uploadDocument(planned("claim.pdf", "pdf"), CTX, resumed.deps),
+    ];
+    expect(outcomes.map((o) => [o.status, o.sha256])).toEqual([
+      ["duplicate", PDF_SHA256],
+      ["ready", PDF_SHA256],
+    ]);
+  });
+
+  it("leaves it out for a text document, whose text the server hashes", async () => {
+    const f = fakes({ readFile: [GREEK_1253], process: [ready(1)] });
+    const outcome = await uploadDocument(planned("σημείωμα.txt", "text"), CTX, f.deps);
+    expect(outcome.status).toBe("ready");
+    expect("sha256" in outcome).toBe(false);
+  });
+
+  it("leaves it out when the file could not be read", async () => {
+    const f = fakes({ readFile: [Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })] });
+    const outcome = await uploadDocument(planned("claim.pdf", "pdf"), CTX, f.deps);
+    expect(outcome.status).toBe("failed");
+    expect("sha256" in outcome).toBe(false);
   });
 });

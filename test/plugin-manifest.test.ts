@@ -102,3 +102,38 @@ describe("the third-party notices beside the bundle", () => {
     expect(readFileSync(join(PLUGIN_ROOT, "server", "pdf.worker.min.mjs"), "utf8")).toMatch(/^\/\*\*\n \* @licstart/);
   });
 });
+
+describe("the init-matter skill and the project picker", () => {
+  const SKILL = join(PLUGIN_ROOT, "skills", "init-matter", "SKILL.md");
+  /** The skill's frontmatter fields (one `key: value` per line) and its body. */
+  const skill = () => {
+    const text = readFileSync(SKILL, "utf8");
+    const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
+    if (match === null) throw new Error("SKILL.md has no frontmatter");
+    const fields = Object.fromEntries(
+      match[1].split("\n").map((line) => {
+        const at = line.indexOf(":");
+        return [line.slice(0, at).trim(), line.slice(at + 1).trim().replace(/^"(.*)"$/, "$1")];
+      }),
+    );
+    return { fields, body: match[2] };
+  };
+
+  it("ships the skill, named init-matter, with a description within 1,024 characters", () => {
+    const { fields } = skill();
+    expect(fields.name).toBe("init-matter");
+    expect(fields.description.length).toBeGreaterThan(0);
+    expect(fields.description.length).toBeLessThanOrEqual(1024);
+  });
+
+  it("names the model's three tools and never the picker-only save_selection", () => {
+    const { fields, body } = skill();
+    for (const tool of ["scan_project", "show_project_picker", "init_matter"]) expect(body, tool).toContain(tool);
+    expect(`${fields.description}\n${body}`).not.toContain("save_selection");
+  });
+
+  it("ships the picker's HTML beside the bundle", () => {
+    const html = join(PLUGIN_ROOT, "server", "ui", "project-picker.html");
+    expect(existsSync(html) && statSync(html).isFile()).toBe(true);
+  });
+});

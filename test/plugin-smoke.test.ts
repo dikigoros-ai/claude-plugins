@@ -39,6 +39,7 @@ interface Run {
 interface ListedTool {
   name: string;
   title?: string;
+  _meta?: { ui?: { resourceUri?: string; visibility?: string[] } };
   annotations?: { destructiveHint?: boolean };
   inputSchema?: { type?: string };
 }
@@ -46,7 +47,11 @@ interface ListedTool {
 interface JsonRpcLine {
   jsonrpc?: string;
   id?: number;
-  result?: { serverInfo?: { name: string; version: string }; tools?: ListedTool[] };
+  result?: {
+    serverInfo?: { name: string; version: string };
+    tools?: ListedTool[];
+    contents?: Array<{ uri: string; mimeType?: string; text?: string; _meta?: { ui?: { csp?: object } } }>;
+  };
 }
 
 /** What a 2025-era client sends to start a session and list the tools. */
@@ -59,6 +64,33 @@ const LIST_TOOLS = [
   },
   { jsonrpc: "2.0", method: "notifications/initialized" },
   { jsonrpc: "2.0", id: 2, method: "tools/list" },
+];
+
+/** The model's tools and the picker's two app-only tools, sorted: every tool tools/list names. */
+const ALL_TOOLS = [
+  "create_matter",
+  "init_matter",
+  "load_picker",
+  "save_selection",
+  "scan_project",
+  "show_project_picker",
+  "upload_to_matter",
+];
+
+/** A client that shows MCP Apps initializes, then reads the picker's resource. */
+const READ_PICKER = [
+  {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-11-25",
+      capabilities: { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } } },
+      clientInfo: { name: "smoke", version: "0" },
+    },
+  },
+  { jsonrpc: "2.0", method: "notifications/initialized" },
+  { jsonrpc: "2.0", id: 2, method: "resources/read", params: { uri: "ui://dikigoros/project-picker" } },
 ];
 
 let tmp: string;
@@ -132,7 +164,7 @@ async function runBundle(
 }
 
 describe("the bundled dikigoros-upload server", () => {
-  it("answers initialize and tools/list with its two tools, writing nothing but JSON-RPC to stdout", async () => {
+  it("answers initialize and tools/list with its tools, writing nothing but JSON-RPC to stdout", async () => {
     const run = await runBundle(
       BUNDLE,
       [],
@@ -154,7 +186,10 @@ describe("the bundled dikigoros-upload server", () => {
     expect(serverInfo).toMatchObject({ name: "dikigoros-upload", version });
 
     const tools = messages.find((message) => message.id === 2)?.result?.tools ?? [];
-    expect(tools.map((tool) => tool.name).sort()).toEqual(["create_matter", "upload_to_matter"]);
+    expect(tools.map((tool) => tool.name).sort()).toEqual(ALL_TOOLS);
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    expect(byName.get("show_project_picker")?._meta?.ui?.resourceUri).toBe("ui://dikigoros/project-picker");
+    for (const name of ["load_picker", "save_selection"]) expect(byName.get(name)?._meta?.ui?.visibility, name).toEqual(["app"]);
     for (const tool of tools) {
       expect(tool.title, tool.name).toMatch(/\S/);
       expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
@@ -184,7 +219,32 @@ describe("the bundled dikigoros-upload server", () => {
       .filter((line) => line !== "")
       .map((line) => JSON.parse(line) as JsonRpcLine)
       .find((message) => message.id === 2)?.result?.tools;
-    expect(tools?.map((tool) => tool.name).sort()).toEqual(["create_matter", "upload_to_matter"]);
+    expect(tools?.map((tool) => tool.name).sort()).toEqual(ALL_TOOLS);
+  });
+
+  it("serves the picker's self-contained HTML as an MCP App with an empty CSP", async () => {
+    const run = await runBundle(
+      BUNDLE,
+      [],
+      { DIKIGOROS_BASE_URL: "http://localhost:3000", DIKIGOROS_AUTH0_CLIENT_ID: "test", CLAUDE_PLUGIN_DATA: dataDir },
+      { messages: READ_PICKER, until: 2 },
+    );
+    expect(run.code, run.stderr).toBe(0);
+    const [content] =
+      run.stdout
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line) as JsonRpcLine)
+        .find((message) => message.id === 2)?.result?.contents ?? [];
+    expect(content).toMatchObject({ uri: "ui://dikigoros/project-picker", mimeType: "text/html;profile=mcp-app" });
+    expect(content._meta?.ui?.csp).toEqual({});
+    const html = content.text ?? "";
+    expect(html).toMatch(/^<!doctype html>/);
+    expect(html).toContain("<script type=\"module\">");
+    // Nothing is loaded from anywhere: no external script, stylesheet, frame or image.
+    expect(html).not.toMatch(/<(script|link|iframe|img)\b[^>]*\b(src|href)=/i);
+    const styles = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? "";
+    expect(styles).not.toMatch(/@import|url\(\s*["']?(https?:)?\/\//i);
   });
 
   it("refuses a DIKIGOROS_BASE_URL other than the allowed origins with one stderr line and exit 1", async () => {

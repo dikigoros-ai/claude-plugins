@@ -46,7 +46,26 @@ export interface PickerFolder {
   depth: number;
 }
 
-/** show_project_picker's structuredContent: everything the widget renders. */
+/**
+ * show_project_picker's structuredContent: small, because a host hands a result's structuredContent
+ * to the model as well as to the widget. The widget takes `scan_id` from it and asks for the tree
+ * with load_picker, an app-only tool the model never sees.
+ */
+export interface ShowPickerResult {
+  status: "picker_open";
+  scan_id: string;
+  mode: "new" | "linked";
+  room: number;
+  eligible: number;
+  preselected: number;
+}
+
+/** load_picker's arguments. */
+export interface LoadPickerArgs {
+  scan_id: string;
+}
+
+/** load_picker's structuredContent: everything the widget renders. */
 export interface PickerInput {
   scan_id: string;
   /** "new": a matter will be created; "linked": the folder is already this matter. */

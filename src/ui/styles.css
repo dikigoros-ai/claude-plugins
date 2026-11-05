@@ -1,0 +1,3 @@
+/* The project picker's styles: the host's style variables (applyHostStyleVariables), with fallbacks. */
+:root { color-scheme: light dark; }
+body { margin: 0; font-family: var(--font-sans, system-ui, sans-serif); background: var(--color-background-primary, Canvas); color: var(--color-text-primary, CanvasText); }

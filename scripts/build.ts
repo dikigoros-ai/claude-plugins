@@ -5,7 +5,10 @@
 // THIRD_PARTY_NOTICES.md: pdf.js's own notice, then the licence of every package the bundle holds
 // code of. The output is committed and CI rebuilds it, failing on any difference, so the same inputs
 // must give the same bytes. The two native packages stay out of the bundle: it installs them on
-// first use and loads them from there (src/native), never from its own directory.
+// first use and loads them from there (src/native), never from its own directory. The project picker
+// widget (src/ui) is bundled for the browser and inlined, with its stylesheet, into one self-contained
+// HTML file at plugins/dikigoros/server/ui/project-picker.html, which the server serves as its ui://
+// resource.
 
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -54,9 +57,49 @@ await copyFiles(join(PDFJS_DIR, "legacy", "build"), SERVER_DIR, ["pdf.worker.min
 await copyFiles(join(PDFJS_DIR, "wasm"), join(SERVER_DIR, "wasm"), [...WASM_DECODERS, ...wasmLicences]);
 await copyFiles(join(PDFJS_DIR, "standard_fonts"), join(SERVER_DIR, "standard_fonts"), fonts);
 
-const packages = await bundledPackages(metafile);
+const picker = await build({
+  absWorkingDir: ROOT,
+  entryPoints: ["src/ui/main.ts"],
+  bundle: true,
+  platform: "browser",
+  format: "esm",
+  target: "es2022",
+  minify: true,
+  write: false,
+  legalComments: "eof",
+  metafile: true,
+  define: { "process.env.NODE_ENV": '"production"', PLUGIN_VERSION: JSON.stringify(manifest.version) },
+  logLevel: "info",
+});
+await writePickerHtml(picker.outputFiles[0].text);
+
+const packages = await bundledPackages(mergeMetafiles(metafile, picker.metafile));
 await writeFile(join(SERVER_DIR, "THIRD_PARTY_NOTICES.md"), await notices(packages));
 console.log(`  wrote the notices of ${packages.length} package(s) to ${relative(ROOT, SERVER_DIR)}/THIRD_PARTY_NOTICES.md`);
+
+/**
+ * The widget's HTML: src/ui/template.html with src/ui/styles.css and the bundled script in place of
+ * its two markers. A "</script" in the script, or "</style" in the styles, would end its element early,
+ * so it is escaped ("<\\/script" means the same inside a JavaScript string or regular expression).
+ */
+async function writePickerHtml(script: string): Promise<void> {
+  const template = await readFile(join(ROOT, "src", "ui", "template.html"), "utf8");
+  const styles = await readFile(join(ROOT, "src", "ui", "styles.css"), "utf8");
+  if (!template.includes("/*__STYLES__*/") || !template.includes("/*__SCRIPT__*/")) {
+    throw new Error("src/ui/template.html lost one of its markers");
+  }
+  const html = template
+    .replace("/*__STYLES__*/", () => styles.replace(/<\/(style)/gi, "<\\/$1"))
+    .replace("/*__SCRIPT__*/", () => script.replace(/<\/(script)/gi, "<\\/$1"));
+  await mkdir(join(SERVER_DIR, "ui"), { recursive: true });
+  await writeFile(join(SERVER_DIR, "ui", "project-picker.html"), html);
+  console.log(`  wrote ${relative(ROOT, SERVER_DIR)}/ui/project-picker.html (${html.length} bytes)`);
+}
+
+/** The inputs of both builds, for the notices. */
+function mergeMetafiles(...metafiles: Metafile[]): Metafile {
+  return { inputs: Object.assign({}, ...metafiles.map((m) => m.inputs)), outputs: {} };
+}
 
 /** Copies the files `names` of directory `from` into directory `to`, made when missing. */
 async function copyFiles(from: string, to: string, names: string[]): Promise<void> {

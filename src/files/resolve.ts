@@ -171,7 +171,7 @@ async function resolveDirectory(directory: string, plan: PlanBuilder): Promise<v
 
 /** One candidate file; the first check it fails decides its reason. `inside` is the real path of the
  *  directory that was named, ending in a separator. */
-async function resolveCandidate(path: string, sizeBytes: number, inside: string): Promise<PlanEntry> {
+export async function resolveCandidate(path: string, sizeBytes: number, inside: string): Promise<PlanEntry> {
   const realPath = await realpath(path).catch(failure);
   if (realPath instanceof FsFailure) return unresolved(path, realPath.reason);
   const name = basename(path);
@@ -198,7 +198,7 @@ async function resolveCandidate(path: string, sizeBytes: number, inside: string)
 }
 
 /** What an accepted extension stands for; null for any other name. */
-function kindOf(name: string): FileKind | null {
+export function kindOf(name: string): FileKind | null {
   switch (MATTER_UPLOAD_EXT_RE.exec(name)?.[1].toLowerCase()) {
     case "pdf":
       return "pdf";

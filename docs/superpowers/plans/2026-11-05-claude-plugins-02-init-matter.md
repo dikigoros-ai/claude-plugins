@@ -442,3 +442,18 @@ it("a truncated scan shows the truncation notice");
 8. **Relative paths are POSIX in storage and display**, so a link file made on Windows reads on macOS.
 9. **Hidden entries, `node_modules`, `__MACOSX` and `~$` lock files are skipped silently** (no row in the picker), as 0.1.0 skips dotfiles in a listing.
 10. **The PATCH stays off the allowlist** (owner, 2026-11-05); the picker sets no role or side.
+
+## Amendments made while executing
+
+1. **`load_picker` (a fifth tool, app-only).** A host hands a result's `structuredContent` to the model as well as to
+   the widget, so `show_project_picker` answers a small `ShowPickerResult` and the widget fetches the tree with
+   `load_picker`. `src/shared/picker-contract.ts` is the contract between the helper and the widget.
+2. **The fallback's `plan_digest` covers the matter fields** as well as the files, so a confirmed call whose title,
+   type, reference or description differ from the listing's lists again.
+3. **`scan_project` also refuses a folder holding the home directory** (`/Users`, `/home`), not only the home
+   directory itself.
+4. **The `/connect` plugin card is not changed in Task M1:** it still reads "coming soon" and gains the install
+   commands (and the init-matter line) when the plugin is published, after gates 01 and 09.
+5. **`init_matter` resumes into the folder's linked matter** whenever the link file names one that still answers,
+   even for a selection made in new-matter mode (the result says so): a crash after the matter was created never
+   leads to a second matter.

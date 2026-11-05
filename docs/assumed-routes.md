@@ -12,17 +12,18 @@ The helper's access token is an Auth0 token for the audience `https://dikigoros.
 PR 1 deployed, the main app accepts such a token only on the routes of its connector-token allowlist
 (`CONNECTOR_TOKEN_ROUTES` in `lib/mcp/auth.ts`), each with the scope it names.
 
-> **Two routes the helper calls are not in PR 1's `CONNECTOR_TOKEN_ROUTES` and must be added by the main series'
-> PR 4:**
+> **The allowlist as of 2026-11-05.**
 >
-> - **`POST /api/matters/[id]/documents/text` (`matters:write`).** Every `.txt` and `.md` upload. Until then each
->   fails with "The server refused the helper's sign-in for POST /api/matters/{id}/documents/text; …".
-> - **`PATCH /api/matters/[id]/documents/[docId]` (`matters:write`, role and side only).** A `role` or `side` given
->   to `upload_to_matter`. Until then they are left unset (`role_applied: false`) and the upload goes on.
-
-The spec's §5.5 says "no document PATCH through the connector at launch" for the MCP tools, so allowlisting the
-`PATCH` for helper tokens is an owner decision for PR 4. If it is declined, the helper still accepts `role` and `side`
-and always reports `role_applied: false`.
+> - **`POST /api/matters/[id]/documents/text` (`matters:write`)**: every `.txt` and `.md` upload. PR 4 never added it;
+>   the main app's fix (branch `claude/plugin-init-matter` in `dikigoros-ai/dikigoros-ai`) does. Until it is deployed,
+>   each such file fails with "The server refused the helper's sign-in for POST /api/matters/{id}/documents/text; …".
+> - **`PATCH /api/matters/[id]/documents/[docId]` stays off the allowlist**, by the owner's decision of 2026-11-05
+>   (connector spec §5.5: no document changes through the connector). The helper still accepts `role` and `side` and
+>   always reports `role_applied: false`; the upload goes on.
+>
+> 0.2.0's init tools call no new route: `scan_project` reads `GET /auth/current-user` and `GET /api/matters` (to count
+> the active matters) and, in a linked folder, `GET /api/matters/{id}`; `init_matter` creates the matter with
+> `POST /api/matters` and uploads each file through the routes below, as `upload_to_matter` does.
 
 ## Every request
 
@@ -44,13 +45,13 @@ Scopes: `matters:read` for the `GET`s under `/api/matters`, `matters:write` for 
 | Method | Path | Scope | Request body | Success | Errors handled |
 |---|---|---|---|---|---|
 | `GET` | `/auth/current-user` | `account:read` | none | 200, the user: `id`, `email`, `plan`, `entitlements: { mattersAccess, docsPerMatter, activeMatters, tier }` and more, which is ignored | 401 after the retry: the session is forgotten and a new sign-in starts. `mattersAccess: false`: the plan sentence; nothing is listed or uploaded |
-| `GET` | `/api/matters` | `matters:read` | none | 200 `{ matters: [{ id, title, caseReference, matterType, status, updatedAt, documentCount }] }` | In the client only: no tool calls it in 0.1.0 |
+| `GET` | `/api/matters` | `matters:read` | none | 200 `{ matters: [{ id, title, caseReference, matterType, status, updatedAt, documentCount }] }` | `scan_project` and `init_matter`'s fallback count the matters whose `status` is `active` against `activeMatters`; a refusal ends the call with its sentence |
 | `POST` | `/api/matters` | `matters:write` | `title`; optional `caseReference`, `matterType`, `description` | 201 `{ matter: { id, userId, title, caseReference, matterType, description, status, deletedAt, createdAt, updatedAt } }` | 401 after the retry: the session is forgotten and a new sign-in starts. 429 `matter_limit_reached` (`limit`), 403 `entitlement_required`: their sentences |
 | `GET` | `/api/matters/{id}` | `matters:read` | none | 200 `{ matter, documents, pins, notes, artifacts }`; the helper reads the matter's `title` and counts `documents` against `docsPerMatter`: a matter that holds that many takes no upload | 404: "Matter not found (or not yours)."; nothing is listed or uploaded |
 | `POST` | `…/upload` | `matters:write` | [the client-token event](#the-client-token-event) | 200 `{ type: "blob.generate-client-token", clientToken }` | Any refusal fails that file |
 | `POST` | `…` | `matters:write` | `filename`, `mimeType`, `sizeBytes`, `sha256` (64 hex), `blobUrl`, `headBytesBase64` (the first 8 bytes) | 201 `{ document }`, `ingestStatus: "pending"` | 409 `duplicate_document` (`documentId`): see [Files already in the matter](#files-already-in-the-matter). 429 `document_limit_reached` (`limit`), 415 `Unsupported file type`: the file fails |
-| `POST` | `…/text` | `matters:write`, **not allowlisted** | `filename`, `text` | 201 `{ document }`, `ingestStatus: "processing"`, one page | As for `POST …` |
-| `PATCH` | `…/{docId}` | `matters:write`, **not allowlisted**, role and side only | `role`, `side` (one or both), sent once the processing is `ready`, to a new document or a resumed one | 200 `{ document }` | Any refusal, or no answer: role and side left unset (`role_applied: false`), one log line; the file stays `ready` |
+| `POST` | `…/text` | `matters:write` (allowlisted by the main app's 2026-11-05 fix) | `filename`, `text` | 201 `{ document }`, `ingestStatus: "processing"`, one page | As for `POST …` |
+| `PATCH` | `…/{docId}` | `matters:write`, **not allowlisted** (owner's decision, 2026-11-05), role and side only | `role`, `side` (one or both), sent once the processing is `ready`, to a new document or a resumed one | 200 `{ document }` | Any refusal, or no answer: role and side left unset (`role_applied: false`), one log line; the file stays `ready` |
 | `POST` | `…/{docId}/ingest` | `matters:write` | [the manifest](#the-manifest) | 200 `{ ocrPages }` | `too_many_ocr_pages` (`limit`), `manifest_too_large`, `Weekly usage limit reached`: the file fails with their sentences |
 | `POST` | `…/{docId}/process` | `matters:write` | none | 200 `{ status, ocrRemaining, suggested?, errorCode?, document? }` | 409 `processing_in_progress`, a 5xx, a rate limit's 429 or no answer: polled again. A quota's 429 (`Weekly usage limit reached`, or a body with `limit` and `used`): the file fails at once with its sentence. `status: "failed"`: the file fails with `errorCode` (`no_text_extracted`), else `processing_failed`, the code standing in for a sentence when there is none |
 | `GET` | `…/{docId}` | `matters:read` | none | 200 `{ document }` with `ingestStatus`, `pageCount` and `pages` | 401, 403 or 404: the file is reported as a duplicate of that document |

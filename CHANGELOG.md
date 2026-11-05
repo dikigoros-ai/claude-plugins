@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+Set a project folder up as a new matter, with a file picker.
+
+- The skill **`dikigoros:init-matter`** (`/dikigoros:init-matter [folder]`): scans a project folder, proposes the
+  matter's fields and the core documents, opens the picker, and on the lawyer's confirmation creates the matter and
+  uploads the files; where the host shows no picker, the same in the chat with a listing and a confirm step.
+- New helper tools: `scan_project` (recursive, read-only: depth 8, 5,000 entries, symlinks only inside the folder;
+  sends nothing about the files), `show_project_picker`, `init_matter`; and, for the picker only, `load_picker` and
+  `save_selection`.
+- The picker, an MCP App at `ui://dikigoros/project-picker`: the matter's fields, the folder's tree with tri-state
+  folders, ineligible files greyed with their reason, a counter against the plan's documents per matter, ticking past
+  it refused; English and Greek; the host's theme; no network access (an empty CSP).
+- `.dikigoros/matter.json` links the folder to its matter, written before the first upload and after each file; a
+  re-run offers only the files not yet uploaded, into the same matter. Same-named files from different subfolders are
+  stored as `Name (2).pdf`.
+- Upload outcomes carry the file's SHA-256 (PDF and DOCX).
+- `@modelcontextprotocol/ext-apps` 2.0.4 (bundled into the server and the picker), `@modelcontextprotocol/client`
+  2.3.1 pinned beside it.
+- Roles and sides: dikigoros.ai keeps the document `PATCH` off the helper's allowlist (owner's decision), so
+  `role_applied` is always false.
+
 ## 0.1.0
 
 Initial release.

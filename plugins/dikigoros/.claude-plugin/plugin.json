@@ -1,8 +1,8 @@
 {
   "name": "dikigoros",
   "displayName": "dikigoros.ai",
-  "version": "0.1.0",
-  "description": "Cyprus case law, legislation and matters from DIKIGOROS AI, plus a local helper that uploads files from this computer into a matter.",
+  "version": "0.2.0",
+  "description": "Cyprus case law, legislation and matters from DIKIGOROS AI, plus a local helper that sets a project folder up as a matter and uploads files from this computer into it.",
   "author": { "name": "DIKIGOROS AI", "url": "https://dikigoros.ai" },
   "homepage": "https://dikigoros.ai/connect",
   "repository": "https://github.com/dikigoros-ai/claude-plugins",

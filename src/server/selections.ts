@@ -28,6 +28,15 @@ export interface StoredScan {
   linked: MatterLink | null;
   /** From the store's clock, when the scan was put. */
   createdAt: number;
+  /** What show_project_picker proposed for the picker, once it has: absent until then. */
+  proposal?: Proposal;
+}
+
+/** What Claude proposed for a scan's picker: the matter's fields (null in a linked folder) and the
+ *  paths to preselect, already checked against the scan and its room. */
+export interface Proposal {
+  matter: MatterFields | null;
+  preselect: string[];
 }
 
 /** The fields of the matter a selection in an unlinked folder opens. */
@@ -99,6 +108,14 @@ export class SelectionStore {
   /** The scan kept under `scanId`, unless it was never put or has been dropped. */
   getScan(scanId: string): StoredScan | undefined {
     return this.#scans.get(scanId);
+  }
+
+  /** Keeps `proposal` on the scan held under `scanId`, replacing an earlier one; undefined, and nothing
+   *  kept, when the scan is not held. */
+  propose(scanId: string, proposal: Proposal): StoredScan | undefined {
+    const stored = this.#scans.get(scanId);
+    if (stored !== undefined) stored.proposal = proposal;
+    return stored;
   }
 
   /**

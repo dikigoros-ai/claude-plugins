@@ -114,6 +114,21 @@ describe("SelectionStore: scans", () => {
     expect(selections.getSelection(fromSecond.selectionId)).toBe(fromSecond);
   });
 
+  it("keeps a proposal on a scan it holds, the newest replacing the one before", () => {
+    const { selections } = store();
+    const stored = selections.putScan(SCAN, ROOM, null);
+    expect(stored.proposal).toBeUndefined();
+    expect(selections.propose(stored.scanId, { matter: MATTER, preselect: ["Σημειώσεις.pdf"] })).toBe(stored);
+    selections.propose(stored.scanId, { matter: null, preselect: [] });
+    expect(selections.getScan(stored.scanId)?.proposal).toStrictEqual({ matter: null, preselect: [] });
+  });
+
+  it("keeps no proposal for a scan it does not hold", () => {
+    const { selections } = store();
+    expect(selections.propose("id-9", { matter: MATTER, preselect: [] })).toBeUndefined();
+    expect(selections.getScan("id-9")).toBeUndefined();
+  });
+
   it("keeps as many scans as its capacity says", () => {
     const { selections } = store({ capacity: 2 });
     const [a, b, c] = [1, 2, 3].map(() => selections.putScan(SCAN, ROOM, null));

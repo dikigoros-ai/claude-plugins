@@ -99,7 +99,7 @@ const uploadToMatterInput = z.object({
   plan_digest: z.string().optional(),
 });
 
-const createMatterInput = z.object({
+export const createMatterInput = z.object({
   title: z.string().trim().min(1).max(300),
   type: z.enum(MATTER_TYPES).optional(),
   case_reference: z.string().max(300).optional(),
@@ -282,7 +282,7 @@ async function uploadPlanned(
 }
 
 /** Why the call starts no more files, `elapsed` milliseconds after it began; undefined when it goes on. */
-function stopReason(request: CallContext | undefined, elapsed: number): { code: string; message: string } | undefined {
+export function stopReason(request: CallContext | undefined, elapsed: number): { code: string; message: string } | undefined {
   if (request?.mcpReq.signal.aborted === true) return CANCELLED;
   if (elapsed > CALL_BUDGET_MS) return OVER_BUDGET;
   return undefined;
@@ -293,7 +293,7 @@ function stopReason(request: CallContext | undefined, elapsed: number): { code: 
  * carries a progress token; undefined when it does not. A notification that cannot be sent is
  * dropped: it never stops an upload.
  */
-function progressOf(request: CallContext | undefined): ((message: string) => void) | undefined {
+export function progressOf(request: CallContext | undefined): ((message: string) => void) | undefined {
   const progressToken = request?.mcpReq._meta?.progressToken;
   if (request === undefined || progressToken === undefined) return undefined;
   let progress = 0;
@@ -310,7 +310,7 @@ function progressOf(request: CallContext | undefined): ((message: string) => voi
  * The outcomes, one line per file, then the matter's URL and the keychain warning when there is
  * one. A failure always says why: its code, when it came without a sentence.
  */
-async function report(matterId: number, reported: DocumentOutcome[], deps: ToolDeps): Promise<CallToolResult> {
+export async function report(matterId: number, reported: DocumentOutcome[], deps: ToolDeps): Promise<CallToolResult> {
   const outcomes = reported.map((outcome) =>
     outcome.status === "failed" && outcome.message === undefined ? { ...outcome, message: outcome.code } : outcome,
   );
@@ -393,7 +393,7 @@ function row(entry: PlanEntry): string {
   return [entry.name, size, entry.kind ?? "—", decision].join(" · ");
 }
 
-function formatSize(bytes: number): string {
+export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -404,7 +404,7 @@ function formatSize(bytes: number): string {
  * the helper is configured and someone is signed in. A sign-in that cannot be read or refreshed
  * changes nothing, as a new sign-in would throw away a session that may well still work.
  */
-async function signInGate({ config, session }: ToolDeps): Promise<CallToolResult | null> {
+export async function signInGate({ config, session }: ToolDeps): Promise<CallToolResult | null> {
   if (config.auth0ClientId === "") return failure(NOT_CONFIGURED);
   let token: string | null;
   try {
@@ -416,7 +416,7 @@ async function signInGate({ config, session }: ToolDeps): Promise<CallToolResult
 }
 
 /** Forgets a session the server refused even after a refresh, and starts a new sign-in. */
-async function restartSignIn(session: SessionLike): Promise<CallToolResult> {
+export async function restartSignIn(session: SessionLike): Promise<CallToolResult> {
   await session.forgetSession();
   return startSignIn(session);
 }
@@ -448,7 +448,7 @@ function signInUnreachable(err: unknown): CallToolResult {
 }
 
 /** A 401 as null, for the caller to read as a dead session; any other rejection stands. */
-function nullOn401(err: unknown): null {
+export function nullOn401(err: unknown): null {
   if (err instanceof ApiError && err.status === 401) return null;
   throw err;
 }
@@ -458,18 +458,18 @@ function nullOn401(err: unknown): null {
  * answer from DIKIGOROS, or from the sign-in service refreshing after a 401) says so with its first
  * line and what the call left `undone`, never as the SDK's raw error.
  */
-function failureAfterSignIn(err: unknown, baseUrl: string, undone: string): CallToolResult {
+export function failureAfterSignIn(err: unknown, baseUrl: string, undone: string): CallToolResult {
   if (err instanceof ApiError) return failure(describeApiError(err, baseUrl));
   return failure(`Could not reach DIKIGOROS (${firstLine(err)}). ${undone}`);
 }
 
 /** A result: `text`, and the same facts as structured content when there are any. */
-function answer(text: string, structuredContent?: Record<string, unknown>): CallToolResult {
+export function answer(text: string, structuredContent?: Record<string, unknown>): CallToolResult {
   const content: CallToolResult["content"] = [{ type: "text", text }];
   return structuredContent === undefined ? { content } : { content, structuredContent };
 }
 
 /** An error result: the call did not do what it was asked to. */
-function failure(text: string): CallToolResult {
+export function failure(text: string): CallToolResult {
   return { content: [{ type: "text", text }], isError: true };
 }
